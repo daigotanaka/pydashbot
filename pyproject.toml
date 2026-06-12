@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pydashbot"
+version = "0.1.0"
+description = "Python control software for the Wonder Workshop Dash robot."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Daigo Tanaka", email = "daigo.tanaka@gmail.com" },
+]
+keywords = ["bleak", "bluetooth", "dash", "robot", "wonder-workshop"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "bleak==0.21.1",
+    "colour==0.1.5",
+    "websockets>=13.0,<16.0",
+]
+
+[project.optional-dependencies]
+tools = [
+    "matplotlib>=3.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/daigotanaka/pydashbot"
+Repository = "https://github.com/daigotanaka/pydashbot"
+
+[project.scripts]
+pydashbot = "dash.ws_client:main"
+pydashbot-server = "dash.ws_server:main"
+
+[tool.setuptools.packages.find]
+include = ["dash*"]
