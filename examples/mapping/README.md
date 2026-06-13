@@ -104,6 +104,13 @@ does not invent shortcuts through unknown space. Movement remains
 obstacle-aware, each leg is limited to 1 meter, and the return aborts if a leg
 stops early or odometry becomes implausible.
 
+When a leg stops early on an obstacle, go-home records that route segment as a
+temporarily blocked edge in the map (its endpoints, the observed stop position,
+and a timestamp). Subsequent go-home attempts exclude blocked edges when
+planning, so the robot reroutes around a known obstruction instead of retrying
+the same corridor. When every proven route home is blocked, the command reports
+this clearly and refuses to move rather than retreating and retrying.
+
 The command refuses to start when the map's latest run does not have a
 trustworthy final pose. The completed or aborted return is appended to the map.
 
@@ -159,6 +166,7 @@ Room-map JSON files preserve every run, including:
 - Raw odometry events
 - Quality checks and loop-closure corrections
 - Go-home planned routes and results
+- Blocked route segments discovered during go-home
 
 The mapper validates forward, reverse, and turn odometry after every command.
 An implausible transition stops the run immediately and marks it `partial`.
@@ -175,29 +183,26 @@ Wheel odometry measures wheel rotation, not physical movement. If Dash is
 blocked while its wheels spin, the saved pose can become inaccurate. Stop the
 run and avoid go-home if this happens.
 
-## Next Challenge: Blocked Go-Home Routes
+## Blocked Go-Home Routes
 
-Go-home currently plans the shortest route along previously traversed path
-segments and safely aborts when a movement leg stops early. The aborted run
-preserves a trustworthy final pose when no odometry update was rejected, so a
-later go-home attempt can replan from Dash's current position.
+Go-home remembers which route segments caused an early stop. Each safely aborted
+attempt records the blocked segment in the map, and later attempts plan around
+it. This avoids the earlier failure where a subsequent attempt re-selected the
+same blocked corridor, retreating and retrying without progress.
 
-However, the planner does not yet remember which route segment caused an early
-stop. A subsequent attempt may select the same blocked corridor again,
-retreating and retrying without making progress.
+How it works:
 
-The next implementation should:
+1. A go-home leg that stops early on an obstacle is recorded as a temporarily
+   blocked edge, including its endpoints, timestamp, and observed stop position.
+2. Blocked-edge data is preserved per run in the map JSON, so it survives across
+   safely aborted go-home runs.
+3. Planning excludes graph edges that run along a blocked corridor. A
+   perpendicular crossing into a different corridor stays usable, so the robot
+   reroutes through proven space when an alternative exists.
+4. When no unblocked proven route home remains, go-home reports this and refuses
+   to move.
 
-1. Record a failed go-home segment as a temporarily blocked graph edge,
-   including its endpoints, timestamp, and observed stop position.
-2. Preserve blocked-edge data in the map JSON across safely aborted go-home
-   runs.
-3. Exclude blocked edges when planning the next shortest proven route home.
-4. Report clearly when no known-safe route home remains.
-5. Optionally perform bounded local exploration to discover a new connection,
-   while always preserving a proven retreat route.
-
-Safety constraints:
+Safety constraints honored by the implementation:
 
 - Never infer an arbitrary shortcut through unknown space.
 - Keep obstacle-aware movement enabled.
@@ -205,6 +210,13 @@ Safety constraints:
 - Only continue from a partial go-home run when its final pose remains
   trustworthy.
 - Avoid repeatedly commanding motion into the same blocked segment.
+
+### Next Challenge: Local Detour Exploration
+
+The planner reroutes only through space it has already proven. When every known
+route is blocked it stops. A future implementation could perform bounded local
+exploration to discover a new connection around an obstruction, while always
+preserving a proven retreat route back to known-safe space.
 
 ## Command Reference
 

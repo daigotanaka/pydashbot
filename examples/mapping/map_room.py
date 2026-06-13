@@ -56,6 +56,7 @@ HOME_ROUTE_LINK_RADIUS_MM = 250
 HOME_ROUTE_COLLINEAR_DEG = 12
 HOME_MAX_LEG_MM = 1000
 HOME_POSITION_TOLERANCE_MM = 100
+BLOCKED_EDGE_TOLERANCE_MM = 150
 MAX_TRACKED_TURN_DEG = 90
 MIN_TRACKED_TURN_DEG = 20
 HOME_CLEAR_RETRY_DELAY = 0.3
@@ -435,6 +436,73 @@ def simplify_home_route(route):
     return simplified
 
 
+def collect_blocked_edges(data):
+    """Return blocked-route segments recorded by prior aborted go-home runs.
+
+    Each segment is ((from_x, from_y), (to_x, to_y)) for a proven path leg that
+    a go-home attempt found physically obstructed.
+    """
+    edges = []
+    for run in data.get('runs', []):
+        for edge in run.get('blocked_edges', []):
+            if 'from' in edge and 'to' in edge:
+                edges.append(
+                    (
+                        (float(edge['from'][0]), float(edge['from'][1])),
+                        (float(edge['to'][0]), float(edge['to'][1])),
+                    )
+                )
+    return edges
+
+
+def _point_near_segment(point, seg_start, seg_end, tolerance):
+    """Return whether point lies within tolerance of segment seg_start-seg_end."""
+    px, py = point
+    ax, ay = seg_start
+    bx, by = seg_end
+    dx, dy = bx - ax, by - ay
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq == 0:
+        return math.hypot(px - ax, py - ay) <= tolerance
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg_len_sq))
+    cx, cy = ax + t * dx, ay + t * dy
+    return math.hypot(px - cx, py - cy) <= tolerance
+
+
+def edge_is_blocked(
+    first_point,
+    second_point,
+    blocked_edges,
+    tolerance=BLOCKED_EDGE_TOLERANCE_MM,
+):
+    """Return whether a graph edge runs along a recorded blocked segment.
+
+    The edge must overlap the blocked corridor (its midpoint falls near the
+    segment) and run roughly parallel to it. A perpendicular crossing into a
+    different corridor stays usable, and a degenerate coincident link is kept so
+    the proximity graph remains connected at the blocked corridor's endpoints.
+    """
+    ex, ey = second_point[0] - first_point[0], second_point[1] - first_point[1]
+    edge_len = math.hypot(ex, ey)
+    if edge_len < 1:
+        return False
+    midpoint = (
+        (first_point[0] + second_point[0]) / 2,
+        (first_point[1] + second_point[1]) / 2,
+    )
+    for seg_start, seg_end in blocked_edges:
+        if not _point_near_segment(midpoint, seg_start, seg_end, tolerance):
+            continue
+        sx, sy = seg_end[0] - seg_start[0], seg_end[1] - seg_start[1]
+        seg_len = math.hypot(sx, sy)
+        if seg_len < 1:
+            return True
+        alignment = abs(ex * sx + ey * sy) / (edge_len * seg_len)
+        if alignment >= math.cos(math.radians(30)):
+            return True
+    return False
+
+
 def plan_home_route(data):
     """Return the shortest route home along previously traversed path segments."""
     latest_run = data.get('runs', [])[-1] if data.get('runs') else None
@@ -450,9 +518,18 @@ def plan_home_route(data):
     if not runs:
         raise ValueError("map does not contain an accepted path home")
 
+    blocked_edges = collect_blocked_edges(data)
+
     nodes = []
     adjacency = {}
     point_lookup = {}
+
+    def link(first, second, distance):
+        if edge_is_blocked(point_lookup[first], point_lookup[second], blocked_edges):
+            return
+        adjacency[first].append((second, distance))
+        adjacency[second].append((first, distance))
+
     for run_index, run in enumerate(runs):
         run_nodes = []
         for point_index, point in enumerate(run['path']):
@@ -463,9 +540,7 @@ def plan_home_route(data):
             adjacency[node] = []
             run_nodes.append(node)
         for first, second in zip(run_nodes, run_nodes[1:]):
-            distance = math.dist(point_lookup[first], point_lookup[second])
-            adjacency[first].append((second, distance))
-            adjacency[second].append((first, distance))
+            link(first, second, math.dist(point_lookup[first], point_lookup[second]))
 
     for index, (first, first_point) in enumerate(nodes):
         for second, second_point in nodes[index + 1:]:
@@ -473,8 +548,7 @@ def plan_home_route(data):
                 continue
             distance = math.dist(first_point, second_point)
             if distance <= HOME_ROUTE_LINK_RADIUS_MM:
-                adjacency[first].append((second, distance))
-                adjacency[second].append((first, distance))
+                link(first, second, distance)
 
     start = (len(runs) - 1, len(runs[-1]['path']) - 1)
     goal = (0, 0)
@@ -495,6 +569,11 @@ def plan_home_route(data):
                 heapq.heappush(queue, (candidate, neighbor))
 
     if goal not in distances:
+        if blocked_edges:
+            raise ValueError(
+                "no unblocked proven route home remains; "
+                f"{len(blocked_edges)} known route segment(s) are blocked"
+            )
         raise ValueError("accepted map paths do not connect back to the starting pose")
 
     route_nodes = [goal]
@@ -603,6 +682,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     path = [(x, y, heading)]
     events = []
     issues = []
+    blocked_edges = []
     odometry_rejected = False
 
     def update_pose(action, requested):
@@ -669,6 +749,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     completed = True
 
     try:
+        prev_waypoint = route[0]
         for waypoint_x, waypoint_y in route[1:]:
             while math.hypot(waypoint_x - x, waypoint_y - y) > HOME_POSITION_TOLERANCE_MM:
                 target_heading = math.degrees(math.atan2(waypoint_y - y, waypoint_x - x))
@@ -709,6 +790,13 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                         traveled = update_pose('forward', requested)
                 if traveled is None or traveled < requested * 0.8:
                     issues.append('go-home leg stopped early')
+                    if traveled is not None:
+                        blocked_edges.append({
+                            'from': [float(prev_waypoint[0]), float(prev_waypoint[1])],
+                            'to': [float(waypoint_x), float(waypoint_y)],
+                            'stop': [round(x, 1), round(y, 1)],
+                            'timestamp': datetime.now().isoformat(timespec='seconds'),
+                        })
                     completed = False
                     break
                 print(
@@ -718,6 +806,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                 )
             if not completed:
                 break
+            prev_waypoint = (waypoint_x, waypoint_y)
 
         if completed:
             completed = turn_to(start_heading)
@@ -751,6 +840,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
         'path': path,
         'walls': [],
         'obstacles': [],
+        'blocked_edges': blocked_edges,
         'events': events,
     }
 
@@ -1199,7 +1289,11 @@ def main(args=None):
     img_path = map_file.with_suffix('.png')
 
     if options.go_home:
-        run = go_home(strategy_map, deg_per_yaw, mm_per_wd)
+        try:
+            run = go_home(strategy_map, deg_per_yaw, mm_per_wd)
+        except ValueError as exc:
+            print(f"Go-home cannot proceed: {exc}")
+            return
     else:
         run = explore(
             deg_per_yaw,

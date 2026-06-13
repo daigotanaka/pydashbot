@@ -168,6 +168,71 @@ class MappingStrategyTests(unittest.TestCase):
             [(1000.0, 0.0), (0.0, 0.0)],
         )
 
+    def test_collect_blocked_edges_reads_recorded_segments(self):
+        data = {
+            "runs": [
+                {"path": [[0, 0, 0]]},
+                {"blocked_edges": [{"from": [1, 2], "to": [3, 4], "stop": [2, 3]}]},
+            ]
+        }
+        self.assertEqual(
+            map_room.collect_blocked_edges(data),
+            [((1.0, 2.0), (3.0, 4.0))],
+        )
+
+    def test_edge_is_blocked_excludes_only_collinear_overlap(self):
+        blocked = [((0, 0), (1000, 0))]
+        self.assertTrue(map_room.edge_is_blocked((200, 0), (800, 0), blocked))
+        # A corridor crossing the blocked segment perpendicularly is still usable.
+        self.assertFalse(map_room.edge_is_blocked((500, -300), (500, 300), blocked))
+
+    def test_home_route_avoids_blocked_segment(self):
+        data = {
+            "runs": [
+                {"status": "accepted", "path": [[0, 0, 0], [1000, 0, 0], [1000, 1000, 0]]},
+                {"status": "accepted", "path": [[0, 0, 0], [0, 1000, 0], [1000, 1000, 0]]},
+                {
+                    "mode": "go_home",
+                    "status": "partial",
+                    "quality": {
+                        "tracking_lost": False,
+                        "rejected_updates": 0,
+                        "issues": ["go-home leg stopped early"],
+                    },
+                    "path": [[1000, 1000, 0]],
+                    "blocked_edges": [
+                        {"from": [1000, 1000], "to": [1000, 0], "stop": [1000, 800]}
+                    ],
+                },
+            ]
+        }
+        route = map_room.plan_home_route(data)
+        # The eastern corridor is blocked, so it must detour via the north.
+        self.assertIn((0.0, 1000.0), route)
+        self.assertNotIn((1000.0, 0.0), route)
+
+    def test_home_route_reports_when_all_routes_blocked(self):
+        data = {
+            "runs": [
+                {"status": "accepted", "path": [[0, 0, 0], [1000, 0, 0]]},
+                {
+                    "mode": "go_home",
+                    "status": "partial",
+                    "quality": {
+                        "tracking_lost": False,
+                        "rejected_updates": 0,
+                        "issues": ["go-home leg stopped early"],
+                    },
+                    "path": [[1000, 0, 0]],
+                    "blocked_edges": [
+                        {"from": [1000, 0], "to": [0, 0], "stop": [600, 0]}
+                    ],
+                },
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "no unblocked proven route"):
+            map_room.plan_home_route(data)
+
     def test_go_home_returns_to_initial_pose_and_heading(self):
         data = {
             "runs": [
