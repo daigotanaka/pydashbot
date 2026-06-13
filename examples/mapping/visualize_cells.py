@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 try:
     from examples.mapping.conservative_exploration import (
         GRID_CELLS,
-        GRID_MM,
         TERRITORY_MM,
         territory_resolution,
     )
@@ -20,7 +19,6 @@ try:
 except ModuleNotFoundError:
     from conservative_exploration import (
         GRID_CELLS,
-        GRID_MM,
         TERRITORY_MM,
         territory_resolution,
     )
@@ -63,7 +61,6 @@ def render_cell_map(data, output, home_route=False):
         for point in run.get('obstacles', [])
     ]
     blockers = walls + obstacles
-    wall_segments = inferred_wall_segments(walls)
     policy = next(
         (
             run['conservative_exploration']
@@ -75,6 +72,8 @@ def render_cell_map(data, output, home_route=False):
     focus = tuple(policy.get('focus_territory', (0, 0)))
     territory_mm = float(policy.get('territory_size_mm', TERRITORY_MM))
     grid_mm = territory_mm / GRID_CELLS
+    # Match the explorer: link wall observations within one reachability cell.
+    wall_segments = inferred_wall_segments(walls, max_distance=grid_mm)
     territories = [
         tuple(territory)
         for territory in policy.get('territories', [focus])

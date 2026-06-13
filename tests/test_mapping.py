@@ -655,7 +655,9 @@ class MappingStrategyTests(unittest.TestCase):
                 ],
             ),
         ):
-            run = map_room.explore(1.0, 1.0, 1500.0, 1000.0, duration=3)
+            run = map_room.explore(
+                1.0, 1.0, 1500.0, 1000.0, duration=3, territory_mm=2000
+            )
 
         move = next(call for call in calls if call[0] == "move")
         self.assertEqual(move[1], (325, map_room.FORWARD_SPEED_MMPS))
@@ -753,6 +755,7 @@ class MappingStrategyTests(unittest.TestCase):
                 100.0,
                 strategy_map=strategy_map,
                 duration=1,
+                territory_mm=2000,
             )
 
         output = " ".join(str(call) for call in print_mock.call_args_list)

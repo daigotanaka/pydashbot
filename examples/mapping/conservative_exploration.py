@@ -15,8 +15,7 @@ except ModuleNotFoundError:
         segment_crosses_wall,
     )
 
-TERRITORY_MM = 2000
-GRID_MM = 500
+TERRITORY_MM = 1000
 GRID_CELLS = 4
 MIN_VISITED_CELLS = 3
 WALL_CLEARANCE_MM = 150

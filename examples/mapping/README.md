@@ -339,13 +339,13 @@ and `plan_home_route` in `examples/mapping/map_room.py`; the per-run
 
 ### Conservative Exploration
 
-The mapper limits exploration to an initial square territory (2 x 2 meters by
+The mapper limits exploration to an initial square territory (1 x 1 meter by
 default; change the side length with `--territory-size MM`). When a forward leg
 approaches the edge of an unlocked territory, it stops short and chooses a new
 direction as though it had reached a mental wall. Smaller territories unlock
 sooner and resolve walled-off cells at finer granularity, because each cell is
 `territory-size / 4` on a side and wall observations are then less likely to
-fall in the same cell Dash drove through.
+fall in the same cell Dash drove through; that is why 1 m is the default.
 
 Mental walls are planning constraints only. They are stored as
 `conservative_exploration` territory metadata on each run and are never added
@@ -370,12 +370,15 @@ progress.) It still rejects directions with less than 200 mm of usable forward
 clearance and directions leading into cells classified as physically blocked or
 unreachable. This prevents repeated turn-only loops near a mental boundary.
 
-Real wall observations within 300 mm of each other are treated as a continuous
-wall segment by the core exploration planner, including when conservative
-exploration is disabled. These inferred segments prevent repeated sampling
-between nearby observations, but remain planning-only evidence and are never
-added to the JSON `walls` points. Conservative reachability consumes the same
-shared segments when enabled.
+Real wall observations within one reachability cell of each other (the cell
+size, `territory-size / 4` — e.g. 250 mm for the 1 m default, 500 mm for a
+2 m territory) are treated as a continuous wall segment by the core exploration
+planner, including when conservative exploration is disabled. Tying the link
+distance to the cell size keeps wall inference at the same scale as the
+reachability grid, so a smaller territory links walls more finely. These
+inferred segments prevent repeated sampling between nearby observations, but
+remain planning-only evidence and are never added to the JSON `walls` points.
+Conservative reachability consumes the same shared segments when enabled.
 
 The mapper reports major progress to stdout with `[cell complete]`,
 `[territory complete]`, and `[adjacent territory unlocked]` messages. Territory

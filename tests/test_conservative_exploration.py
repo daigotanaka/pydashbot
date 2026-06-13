@@ -13,13 +13,17 @@ class ConservativeExplorationTests(unittest.TestCase):
     def test_territory_completes_when_majority_is_unreachable(self):
         visited = [(100, y) for y in (100, 600, 1100, 1600)]
         barrier = [(600, y) for y in (100, 600, 1100, 1600)]
-        resolution = conservative.territory_resolution((0, 0), visited, barrier)
+        resolution = conservative.territory_resolution(
+            (0, 0), visited, barrier, territory_mm=2000
+        )
         self.assertEqual(len(resolution["visited"]), 4)
         self.assertEqual(len(resolution["blocked"]), 4)
         self.assertEqual(len(resolution["unreachable"]), 8)
         self.assertEqual(resolution["frontier"], set())
         self.assertTrue(
-            conservative.territory_sufficiently_mapped((0, 0), visited, barrier)
+            conservative.territory_sufficiently_mapped(
+                (0, 0), visited, barrier, territory_mm=2000
+            )
         )
 
     def test_territory_stays_open_when_barrier_has_a_gap(self):
@@ -29,6 +33,7 @@ class ConservativeExplorationTests(unittest.TestCase):
             (0, 0),
             visited,
             barrier_with_gap,
+            territory_mm=2000,
         )
         self.assertTrue(resolution["frontier"])
         self.assertFalse(
@@ -36,6 +41,7 @@ class ConservativeExplorationTests(unittest.TestCase):
                 (0, 0),
                 visited,
                 barrier_with_gap,
+                territory_mm=2000,
             )
         )
 
@@ -78,7 +84,9 @@ class ConservativeExplorationTests(unittest.TestCase):
     def test_heading_preference_targets_reachable_unvisited_cells(self):
         path = [(250, 250), (750, 250)]
         blockers = [(250, 750), (750, 750)]
-        policy = conservative.ConservativeExploration([], (250, 250), path, blockers)
+        policy = conservative.ConservativeExploration(
+            [], (250, 250), path, blockers, territory_mm=2000
+        )
         self.assertGreater(
             policy.heading_preference(750, 250, 0),
             policy.heading_preference(750, 250, 180),
@@ -87,7 +95,9 @@ class ConservativeExplorationTests(unittest.TestCase):
     def test_heading_preference_excludes_unreachable_cells(self):
         path = [(250, y) for y in (250, 750, 1250, 1750)]
         barrier = [(750, y) for y in (250, 750, 1250, 1750)]
-        policy = conservative.ConservativeExploration([], (250, 250), path, barrier)
+        policy = conservative.ConservativeExploration(
+            [], (250, 250), path, barrier, territory_mm=2000
+        )
         self.assertLess(
             policy.heading_preference(250, 250, 0),
             policy.heading_preference(250, 250, 90),
@@ -161,6 +171,7 @@ class ConservativeExplorationTests(unittest.TestCase):
             bottom_row + south_path,
             [],
             wall_segments,
+            territory_mm=2000,
         )
         self.assertEqual(resolution["visited"], {(0, 0), (1, 0), (2, 0), (3, 0)})
         self.assertEqual(len(resolution["unreachable"]), 12)
@@ -172,6 +183,7 @@ class ConservativeExplorationTests(unittest.TestCase):
             bottom_row + south_path,
             [],
             wall_segments,
+            territory_mm=2000,
         )
         policy.unlock_if_complete()
         self.assertEqual(policy.focus, (0, -1))
@@ -197,6 +209,7 @@ class ConservativeExplorationTests(unittest.TestCase):
             bottom_row + south_path,
             [],
             wall_segments,
+            territory_mm=2000,
         )
         policy.unlock_if_complete()
         self.assertEqual(policy.focus, (0, -1))
@@ -211,6 +224,7 @@ class ConservativeExplorationTests(unittest.TestCase):
             path,
             walls,
             exploration_walls.inferred_wall_segments(walls),
+            territory_mm=2000,
         )
         self.assertLess(
             policy.heading_preference(250, 250, 0),

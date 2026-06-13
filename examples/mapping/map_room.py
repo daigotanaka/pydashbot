@@ -23,6 +23,7 @@ from dash.ws_client import send_command
 try:
     from examples.mapping.conservative_exploration import (
         ConservativeExploration,
+        GRID_CELLS,
         TERRITORY_MM,
     )
     from examples.mapping.exploration_walls import (
@@ -31,7 +32,11 @@ try:
         point_segment_distance,
     )
 except ModuleNotFoundError:
-    from conservative_exploration import ConservativeExploration, TERRITORY_MM
+    from conservative_exploration import (
+        ConservativeExploration,
+        GRID_CELLS,
+        TERRITORY_MM,
+    )
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
@@ -1261,7 +1266,11 @@ def explore(
         for run in accepted_runs(strategy_map or {})
         for point in run.get('obstacles', [])
     ]
-    known_wall_segments = inferred_wall_segments(known_walls)
+    # Link wall observations within one reachability cell, so a smaller
+    # territory infers continuous walls at a proportionally finer scale
+    # (cell = territory / grid). Replaces the former fixed 300 mm threshold.
+    cell_mm = territory_mm / GRID_CELLS
+    known_wall_segments = inferred_wall_segments(known_walls, max_distance=cell_mm)
     policy = (
         ConservativeExploration(
             accepted_runs(strategy_map or {}),
@@ -1406,7 +1415,9 @@ def explore(
         landmarks.append(point)
         known_blockers.append(point)
         if points is walls:
-            known_wall_segments[:] = inferred_wall_segments(known_walls)
+            known_wall_segments[:] = inferred_wall_segments(
+                known_walls, max_distance=cell_mm
+            )
         if policy:
             policy.report_progress()
 
