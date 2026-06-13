@@ -66,6 +66,14 @@ INFERRED_WALL_PENALTY = 500000
 ODOMETRY_SIGN_TOLERANCE_MM = 40
 ODOMETRY_MAX_MOVE_HEADING_DEG = 45
 ODOMETRY_MAX_TURN_DISTANCE_MM = 150
+# Wheel-vs-gyro slip detection. The left/right wheel-tick difference implies a
+# heading change through the track width; if it diverges from the heading the
+# gyro actually measured by more than this, one wheel slipped (it spun without
+# the robot turning, or vice versa) and the transition is rejected before it
+# corrupts the pose. Track width was backed out from clean in-place turns
+# (heading = (right - left) * mm_per_wheel_tick / track_width); see README.
+TRACK_WIDTH_MM = 87.0
+ODOMETRY_SLIP_HEADING_DEG = 45
 LOOP_CLOSURE_MATCH_RADIUS_MM = 350
 LOOP_CLOSURE_PATH_RADIUS_MM = 700
 LOOP_CLOSURE_MAX_CORRECTION_MM = 250
@@ -218,7 +226,15 @@ def tracked_turn_steps(degrees):
     return [degrees / count] * count
 
 
-def validate_odometry(action, requested, distance_mm, heading_delta):
+def validate_odometry(
+    action,
+    requested,
+    distance_mm,
+    heading_delta,
+    left_delta=None,
+    right_delta=None,
+    mm_per_wheel_tick=None,
+):
     """Return reasons an odometry transition is implausible for its command."""
     issues = []
     requested_signed = requested
@@ -244,6 +260,24 @@ def validate_odometry(action, requested, distance_mm, heading_delta):
             issues.append('turn measured excessive heading change')
         if requested < 170 and heading_delta * requested_signed < -10:
             issues.append('turn measured the wrong direction')
+    if (
+        action in ('forward', 'reverse')
+        and left_delta is not None
+        and right_delta is not None
+        and mm_per_wheel_tick
+    ):
+        # On a straight move the wheel-tick difference implies a heading change;
+        # if it disagrees with what the gyro actually measured, one wheel slipped
+        # and the averaged distance that updates position is bogus. This catches
+        # slips the gyro-only checks above miss, because they trust the measured
+        # heading. Turns are excluded: there the gyro is the source of truth for
+        # heading and translation is ~0, so a wheel over-spin cannot corrupt the
+        # pose.
+        wheel_heading_delta = math.degrees(
+            (right_delta - left_delta) * mm_per_wheel_tick / TRACK_WIDTH_MM
+        )
+        if abs(wheel_heading_delta - heading_delta) > ODOMETRY_SLIP_HEADING_DEG:
+            issues.append('wheel rotation inconsistent with gyro (suspected wheel slip)')
     return issues
 
 
@@ -879,6 +913,9 @@ def go_home(data, deg_per_yaw, mm_per_wd):
             requested,
             distance_mm,
             heading_delta,
+            left_delta,
+            right_delta,
+            mm_per_wd,
         )
         yaw_prev, left_prev, right_prev = yaw_now, left_now, right_now
         event = {
@@ -1253,7 +1290,15 @@ def explore(
         yaw_prev = yaw_now
         left_prev = left_now
         right_prev = right_now
-        issues = validate_odometry(action, requested, d_mm, heading_delta)
+        issues = validate_odometry(
+            action,
+            requested,
+            d_mm,
+            heading_delta,
+            left_delta,
+            right_delta,
+            mm_per_wd,
+        )
         event = {
             'action': action,
             'requested': requested,

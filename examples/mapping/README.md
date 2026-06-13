@@ -444,7 +444,7 @@ Relevant code: `go_home_with_retries`, `go_home`, `plan_home_route`,
 `edge_is_blocked`, and the final-approach helpers (`crawl_home`,
 `rear_reference`) in `examples/mapping/map_room.py`.
 
-### Next Challenge: Detecting Wheel Slip
+### Detecting Wheel Slip
 
 Wheel odometry measures wheel *rotation*, not physical movement. On a low bump,
 threshold, or slick spot, the tires can keep turning while Dash makes little or
@@ -457,20 +457,33 @@ the accelerometer, and the proximity sensors.
 
 There are two distinct cases, with different detectability:
 
-1. **Differential slip (one wheel).** One tire grips while the other slips or
-   spins free. This is detectable by cross-checking the wheels against the gyro:
-   the left/right encoder difference implies a heading change (through the track
-   width and `mm_per_wheel_tick`), which can be compared to the heading change
-   the gyro actually measured. A persistent mismatch — the wheels imply a turn
-   the gyro does not see, or vice versa — indicates a slipping wheel. This reuses
-   data the mapper already reads every step (`get_left_wheel`, `get_right_wheel`,
-   `get_yaw`). Measuring the raw left/right odometer difference, as a first cut,
-   is exactly this signal.
-2. **Common-mode slip (both wheels).** Both tires spin equally while Dash sits
-   still or is high-centered on a bump. This is the hard case: equal left and
-   right deltas with no rotation look like a perfectly valid straight move, so
-   the wheel-vs-gyro check cannot see it. Catching it needs a signal independent
-   of the wheels:
+1. **Differential slip (one wheel) — detected.** One tire grips while the other
+   slips or spins free. On a straight move this is now caught in
+   `validate_odometry`: the left/right encoder difference implies a heading
+   change through the track width
+   (`(right_delta - left_delta) * mm_per_wheel_tick / TRACK_WIDTH_MM`, with
+   `TRACK_WIDTH_MM` ≈ 87 mm backed out from clean in-place turns), and when it
+   diverges from the heading the gyro actually measured by more than
+   `ODOMETRY_SLIP_HEADING_DEG` (45°) the transition is rejected — stopping the
+   run before the bogus averaged distance corrupts the pose. The check is scoped
+   to forward/reverse moves: on a turn the gyro is the source of truth for
+   heading and translation is ~0, so a wheel over-spin there cannot corrupt the
+   pose. Across a captured 156-event session it flagged exactly the one real slip
+   with no false positives on the 78 clean translation legs.
+
+   Recorded example that is now rejected (a real forward leg from a captured
+   run's `events`): the right wheel turned ~2.2x the left (1366 vs 2954 ticks)
+   while the gyro measured only 4.6°. The wheel difference implies ~208° of
+   rotation; the gyro saw 5 — the slip. Previously `validate_odometry` accepted
+   it (the gyro heading 4.6° < its 45° limit) and averaged the wheels into a
+   bogus 429 mm of travel, corrupting every later pose and leaving
+   `run_pose_trustworthy` wrongly calling the final pose safe. It is now rejected.
+
+2. **Common-mode slip (both wheels) — still open.** Both tires spin equally while
+   Dash sits still or is high-centered on a bump. This is the hard case: equal
+   left and right deltas with no rotation look like a perfectly valid straight
+   move, so the wheel-vs-gyro check above cannot see it. Catching it needs a
+   signal independent of the wheels:
    - **Accelerometer / pitch.** A real forward move produces acceleration
      transients and, climbing a bump, a pitch spike. Wheels advancing with a flat
      accelerometer (no motion) or a pitch event (stuck on a bump) is suspicious.
@@ -481,41 +494,10 @@ There are two distinct cases, with different detectability:
      This only works near mapped features (it is a stricter cousin of the
      existing loop-closure revisit correction).
 
-A practical implementation could start with the differential wheel-vs-gyro check
-(cheap, always available, catches one-wheel slip) and add an accelerometer-based
-"wheels turning but not accelerating" heuristic for the high-centered case. On
-suspected slip, stop the run, mark the segment uncertain (mirroring how
-implausible odometry is already isolated), and either re-reference against a
-known wall or require re-docking rather than trusting the drifted pose.
-
-Recorded evidence (a real go-home forward leg that slipped, from a captured
-run's `events`):
-
-```json
-{"action": "forward", "requested": 702,
- "raw_left_wheel_delta": 1968, "raw_right_wheel_delta": 5084,
- "raw_yaw_delta": 120, "heading_delta": 8.2,
- "distance_mm": 700.5, "accepted": true}
-```
-
-On a straight move the right wheel turned 2.6x the left (1968 vs 5084 ticks, a
-61% asymmetry) while the gyro measured only 8.2 degrees of rotation. The wheel
-difference implies a heading change of roughly 400 degrees; the gyro saw 8 — a
-gross mismatch that is the slip. Yet `validate_odometry` accepted it, because it
-only checks the gyro heading change (8 < the 45-degree limit) and averages the
-two wheels into a bogus 700 mm of travel. The pose was corrupted from that step
-on, and because `tracking_lost` stayed `false`, `run_pose_trustworthy` would
-still wrongly call the final pose safe.
-
-Planned next step (concrete): in `validate_odometry`, compute the wheel-implied
-heading change as `(right_delta - left_delta) * mm_per_wheel_tick / track_width`
-and reject the transition when it diverges from the gyro `heading_delta` beyond a
-tolerance. Dash's track width measured about 87 mm, backed out from clean turn
-events (for a pure rotation, `heading = (right - left) * mm_per_wheel_tick /
-track_width`); confirm it against several turns before hard-coding or calibrating
-it. The recorded event above is a positive test case, and the many normal events
-in the same run give the negative cases for setting the tolerance without false
-positives.
+   On suspected common-mode slip the response should mirror the differential
+   case: stop the run, mark the segment uncertain (as implausible odometry is
+   already isolated), and re-reference against a known wall or require re-docking
+   rather than trusting the drifted pose.
 
 Safety and correctness constraints:
 
@@ -524,7 +506,8 @@ Safety and correctness constraints:
 - Keep the existing odometry validation and loop-closure corrections; slip
   detection augments them rather than replacing them.
 
-Relevant code: `update_pose` and `validate_odometry` in
+Relevant code: `validate_odometry` (and the `TRACK_WIDTH_MM` /
+`ODOMETRY_SLIP_HEADING_DEG` constants) and `update_pose` in
 `examples/mapping/map_room.py`; the `get_left_wheel`, `get_right_wheel`,
 `get_yaw`, `get_pitch`, and `get_acceleration` sensors in `dash/sensors.py`.
 

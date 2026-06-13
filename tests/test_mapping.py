@@ -459,6 +459,41 @@ class MappingStrategyTests(unittest.TestCase):
         issues = map_room.validate_odometry("turn", 90, 0, 372)
         self.assertIn("turn measured excessive heading change", issues)
 
+    def test_odometry_validation_rejects_forward_wheel_slip(self):
+        # Captured slip: right wheel spun 2.16x the left (implying a ~208 deg
+        # turn) while the gyro measured only 4.6 deg on a straight move.
+        issues = map_room.validate_odometry(
+            "forward", 425, 429.1, 4.6,
+            left_delta=1366, right_delta=2954, mm_per_wheel_tick=0.1987,
+        )
+        self.assertIn(
+            "wheel rotation inconsistent with gyro (suspected wheel slip)",
+            issues,
+        )
+
+    def test_odometry_validation_accepts_clean_forward_wheels(self):
+        issues = map_room.validate_odometry(
+            "forward", 1000, 1009.5, -0.14,
+            left_delta=5082, right_delta=5080, mm_per_wheel_tick=0.1987,
+        )
+        self.assertEqual(issues, [])
+
+    def test_odometry_slip_check_excludes_turns(self):
+        # A turn where the wheels imply far more rotation than the gyro saw is
+        # not a pose-corrupting slip (heading comes from the gyro, translation
+        # is ~0), so it must not be flagged.
+        issues = map_room.validate_odometry(
+            "turn", 47, 1.7, 47.4,
+            left_delta=-699, right_delta=716, mm_per_wheel_tick=0.1987,
+        )
+        self.assertNotIn(
+            "wheel rotation inconsistent with gyro (suspected wheel slip)",
+            issues,
+        )
+
+    def test_odometry_validation_without_wheel_data_skips_slip_check(self):
+        self.assertEqual(map_room.validate_odometry("forward", 100, 105, 1.0), [])
+
     def test_map_knowledge_uses_only_accepted_runs(self):
         data = {
             "schema_version": 2,
