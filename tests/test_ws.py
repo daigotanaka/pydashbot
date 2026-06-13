@@ -3,13 +3,17 @@ import json
 import threading
 import unittest
 
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+
 from dash.ws_client import build_uri, parse_args as parse_client_args
 from dash.ws_server import (
     execute_request,
     greet_robot,
+    handle_client,
     parse_args as parse_server_args,
     say_goodbye_and_disconnect,
     silence_robot,
+    stop_robot,
 )
 
 
@@ -22,6 +26,9 @@ class FakeRobot:
 
     def say(self, sound):
         self.calls.append(("say", sound))
+
+    def stop(self):
+        self.calls.append(("stop",))
 
     def disconnect(self):
         self.calls.append(("disconnect",))
@@ -139,12 +146,14 @@ class WebSocketLifecycleTests(unittest.TestCase):
 
         self.assertEqual(robot.calls, [("say", "hi")])
 
-    def test_robot_says_bye_before_disconnect(self):
+    def test_robot_stops_and_says_bye_before_disconnect(self):
         robot = FakeRobot()
 
         say_goodbye_and_disconnect(robot)
 
-        self.assertEqual(robot.calls, [("say", "bye"), ("disconnect",)])
+        self.assertEqual(
+            robot.calls, [("stop",), ("say", "bye"), ("disconnect",)]
+        )
 
     def test_robot_disconnects_when_saying_bye_fails(self):
         class FailingRobot(FakeRobot):
@@ -157,7 +166,86 @@ class WebSocketLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "sound failed"):
             say_goodbye_and_disconnect(robot)
 
-        self.assertEqual(robot.calls, [("say", "bye"), ("disconnect",)])
+        self.assertEqual(
+            robot.calls, [("stop",), ("say", "bye"), ("disconnect",)]
+        )
+
+
+class FakeWebSocket:
+    """Minimal async-iterable websocket for handle_client tests."""
+
+    def __init__(self, messages, iter_exc=None, send_exc=None):
+        self._messages = list(messages)
+        self._iter_exc = iter_exc
+        self._send_exc = send_exc
+        self.sent = []
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._messages:
+            return self._messages.pop(0)
+        if self._iter_exc is not None:
+            raise self._iter_exc
+        raise StopAsyncIteration
+
+    async def send(self, data):
+        if self._send_exc is not None:
+            raise self._send_exc
+        self.sent.append(data)
+
+
+class HandleClientDisconnectTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.robot = FakeRobot()
+        self.lock = threading.Lock()
+
+    async def test_clean_exchange_does_not_stop_robot(self):
+        message = json.dumps({"method": "add", "args": [2], "kwargs": {"right": 3}})
+        websocket = FakeWebSocket([message])
+
+        await handle_client(websocket, self.robot, self.lock)
+
+        self.assertEqual(websocket.sent, [json.dumps({"ok": True, "result": 5})])
+        self.assertNotIn(("stop",), self.robot.calls)
+
+    async def test_abrupt_disconnect_on_send_stops_robot(self):
+        message = json.dumps({"method": "add", "args": [1]})
+        websocket = FakeWebSocket(
+            [message], send_exc=ConnectionClosedError(None, None)
+        )
+
+        await handle_client(websocket, self.robot, self.lock)
+
+        self.assertEqual(self.robot.calls, [("stop",)])
+
+    async def test_abrupt_disconnect_while_waiting_stops_robot(self):
+        websocket = FakeWebSocket([], iter_exc=ConnectionClosedError(None, None))
+
+        await handle_client(websocket, self.robot, self.lock)
+
+        self.assertEqual(self.robot.calls, [("stop",)])
+
+    async def test_clean_close_mid_send_does_not_stop_robot(self):
+        message = json.dumps({"method": "add", "args": [1]})
+        websocket = FakeWebSocket([message], send_exc=ConnectionClosedOK(None, None))
+
+        await handle_client(websocket, self.robot, self.lock)
+
+        self.assertNotIn(("stop",), self.robot.calls)
+
+    async def test_stop_robot_swallows_errors(self):
+        class FailingRobot(FakeRobot):
+            def stop(self):
+                super().stop()
+                raise RuntimeError("ble dropped")
+
+        robot = FailingRobot()
+
+        stop_robot(robot, self.lock)
+
+        self.assertEqual(robot.calls, [("stop",)])
 
 
 class WebSocketClientTests(unittest.IsolatedAsyncioTestCase):

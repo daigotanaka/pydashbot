@@ -9,6 +9,7 @@ import sys
 import threading
 
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from dash.command_protocol import execute_json
 from dash.interactive import discover_and_connect_sync
@@ -65,6 +66,10 @@ def greet_robot(robot):
 
 def say_goodbye_and_disconnect(robot):
     try:
+        robot.stop()
+    except Exception as error:
+        print(f"Failed to stop robot during shutdown: {error}", flush=True)
+    try:
         robot.say("bye")
     finally:
         robot.disconnect()
@@ -76,12 +81,34 @@ def execute_request(message, robot, command_lock):
         return execute_json(message, robot)
 
 
+def stop_robot(robot, command_lock):
+    """Best-effort halt of the robot, holding the command lock.
+
+    A client opens a fresh connection per command, so a normal exchange closes
+    cleanly and never reaches here. This runs only when a client disconnects
+    abruptly (for example killed mid-command), so a move that was in flight
+    cannot leave the robot driving with no client able to stop it.
+    """
+    with command_lock:
+        try:
+            robot.stop()
+        except Exception as error:
+            print(f"Failed to stop robot after disconnect: {error}", flush=True)
+
+
 async def handle_client(websocket, robot, command_lock):
-    async for message in websocket:
-        response = await asyncio.to_thread(
-            execute_request, message, robot, command_lock
-        )
-        await websocket.send(json.dumps(response))
+    try:
+        async for message in websocket:
+            response = await asyncio.to_thread(
+                execute_request, message, robot, command_lock
+            )
+            await websocket.send(json.dumps(response))
+    except ConnectionClosedOK:
+        # Client closed cleanly mid-exchange; nothing left to do.
+        pass
+    except ConnectionClosedError:
+        # Abrupt disconnect (no close frame): halt the robot as a safety net.
+        await asyncio.to_thread(stop_robot, robot, command_lock)
 
 
 async def run_server(robot, host=HOST, port=PORT):
