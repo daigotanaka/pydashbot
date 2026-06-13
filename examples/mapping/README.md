@@ -117,9 +117,21 @@ threshold and a longer confirmation streak, so it can graze past walls it
 already drove past while a solid head-on wall still stops it. When a leg begins
 with a near-reversal turn that faces a wall Dash just drove away from, it takes a
 short bounded clearance nudge to step off that wall before normal stopping
-resumes. And because returning to the starting corner means approaching its
-walls head-on, an obstacle halt within a short distance of the home pose counts
-as arrival: Dash turns to the starting orientation and the run completes.
+resumes.
+
+Returning to the starting corner means approaching its walls head-on, so the
+forward sensors stop Dash a short distance out. Once an obstacle halt occurs
+within the near-home zone, go-home runs a final approach for precision:
+
+1. It crawls straight at the home pose with a relaxed front threshold and slow,
+   short steps, closing the remaining distance until it reaches position
+   tolerance or is genuinely blocked.
+2. It turns to the starting orientation.
+3. It re-references to the rear wall, mirroring docking: reverse until the rear
+   sensor finds the wall, then step forward by the dock clearance. This nails the
+   rear axis. If the rear wall is not found within range, this step is skipped.
+
+The run then completes at the starting pose and orientation.
 
 Each motion reports why it halted (an obstacle with the triggering sensor
 readings, a tilt, or a stalled or under-rotated turn), and go-home prints that
