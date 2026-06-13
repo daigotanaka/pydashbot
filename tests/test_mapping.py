@@ -141,8 +141,32 @@ class MappingStrategyTests(unittest.TestCase):
                 }
             ]
         }
-        with self.assertRaisesRegex(ValueError, "latest run to be accepted"):
+        with self.assertRaisesRegex(ValueError, "trustworthy final saved pose"):
             map_room.plan_home_route(data)
+
+    def test_home_route_accepts_safely_aborted_go_home_pose(self):
+        data = {
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [[0, 0, 0], [1000, 0, 0]],
+                },
+                {
+                    "mode": "go_home",
+                    "status": "partial",
+                    "quality": {
+                        "tracking_lost": True,
+                        "rejected_updates": 0,
+                        "issues": ["go-home leg stopped early"],
+                    },
+                    "path": [[1000, 0, 0]],
+                },
+            ]
+        }
+        self.assertEqual(
+            map_room.plan_home_route(data),
+            [(1000.0, 0.0), (0.0, 0.0)],
+        )
 
     def test_go_home_returns_to_initial_pose_and_heading(self):
         data = {
@@ -174,7 +198,8 @@ class MappingStrategyTests(unittest.TestCase):
                 side_effect=[
                     90, -100, 100,
                     90, 900, 1100,
-                    -90, 1100, 900,
+                    0, 1100, 900,
+                    -90, 1300, 700,
                 ],
             ),
         ):
@@ -198,6 +223,31 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(map_room.forward_distance_for_remaining(60), 3000)
         self.assertEqual(map_room.forward_distance_for_remaining(2.5), 500)
         self.assertEqual(map_room.forward_distance_for_remaining(0.1), 200)
+        self.assertEqual(map_room.home_leg_distance(452.429), 452)
+        self.assertEqual(map_room.home_leg_distance(1200.5), 1000)
+
+    def test_corner_dock_turns_left_toward_side_wall_then_right_into_room(self):
+        calls = []
+        readings = {
+            "get_prox_rear": iter([map_room.REAR_THRESHOLD]),
+            "get_prox_left": iter([map_room.PROX_THRESHOLD]),
+            "get_prox_right": iter([0]),
+        }
+
+        def send_command(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(map_room.time, "sleep"),
+        ):
+            map_room.dock_to_corner(1.0, 1.0)
+
+        turns = [args[0] for method, args, _ in calls if method == "turn"]
+        self.assertEqual(turns, [90, -90])
 
     def test_odometry_validation_rejects_negative_forward_distance(self):
         issues = map_room.validate_odometry("forward", 3000, -1668, -2.6)
@@ -208,6 +258,15 @@ class MappingStrategyTests(unittest.TestCase):
             map_room.wrap_delta(0x7FFF0, 0x80020, 20),
             0x30,
         )
+
+    def test_yaw_wrap_reports_short_positive_turn(self):
+        self.assertEqual(map_room.wrap_delta(1500, -1314, 12), 1282)
+        self.assertEqual(map_room.wrap_delta(0, 55574, 12), -1770)
+
+    def test_large_tracked_turns_are_split_into_unambiguous_steps(self):
+        self.assertEqual(map_room.tracked_turn_steps(90), [90])
+        self.assertEqual(map_room.tracked_turn_steps(-150), [-75, -75])
+        self.assertEqual(map_room.tracked_turn_steps(180), [90, 90])
 
     def test_wheel_translation_averages_both_wheels(self):
         self.assertEqual(

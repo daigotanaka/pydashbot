@@ -54,12 +54,7 @@ def read_settled(getter, stable=5, tol=2, timeout=4.0, poll=0.1):
 def wrap_delta(prev, curr, bits):
     half = 1 << (bits - 1)
     full = 1 << bits
-    d = curr - prev
-    if d > half:
-        d -= full
-    elif d < -half:
-        d += full
-    return d
+    return (curr - prev + half) % full - half
 
 
 def wheel_translation_delta(left_before, left_after, right_before, right_after):
@@ -80,7 +75,7 @@ def main(args=None):
     send_command('turn', 90)
     yaw90 = read_settled('get_yaw')
 
-    yaw_delta = wrap_delta(yaw0, yaw90, 16)
+    yaw_delta = wrap_delta(yaw0, yaw90, 12)
     if abs(yaw_delta) < 3:
         print("  Warning: yaw delta too small, using default scale")
         deg_per_yaw = 0.076

@@ -35,6 +35,15 @@ class SensorDecodeTests(unittest.TestCase):
 
         self.assertEqual(self.state["wheel_distance"], 0xF3456)
 
+    def test_yaw_ignores_unused_upper_nibble(self):
+        value = bytearray(20)
+        value[12] = 0x4A
+        value[13] = 0xED
+
+        self.sensors._dash_sensor_decode(None, value)
+
+        self.assertEqual(self.state["yaw"], -694)
+
     def test_dot_stream_decodes_motion_flags(self):
         value = bytearray(20)
         value[11] = 0x25

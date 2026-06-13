@@ -157,7 +157,7 @@ class RobotSensors(object):
         self.sensor_state["prox_right"] = value[6]
         self.sensor_state["prox_left"] = value[7]
         self.sensor_state["prox_rear"] = value[8]
-        yaw = _to_int((value[13]  << 8) | value[12], 12)
+        yaw = _to_int(((value[13] << 8) | value[12]) & 0x0FFF, 12)
         self.sensor_state["yaw_delta"] = yaw  - self.sensor_state["yaw"]
         self.sensor_state["yaw"] = yaw
 

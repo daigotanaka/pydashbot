@@ -56,6 +56,9 @@ HOME_ROUTE_LINK_RADIUS_MM = 250
 HOME_ROUTE_COLLINEAR_DEG = 12
 HOME_MAX_LEG_MM = 1000
 HOME_POSITION_TOLERANCE_MM = 100
+MAX_TRACKED_TURN_DEG = 90
+MIN_TRACKED_TURN_DEG = 20
+HOME_CLEAR_RETRY_DELAY = 0.3
 
 WALL_SOUNDS   = ['ohno', 'ayayay', 'huh', 'confused2', 'confused3']
 TILT_SOUNDS   = ['ayayay', 'ohno', 'confused5', 'confused8']
@@ -118,12 +121,7 @@ def positive_seconds(value):
 def wrap_delta(prev, curr, bits):
     half = 1 << (bits - 1)
     full = 1 << bits
-    d = curr - prev
-    if d > half:
-        d -= full
-    elif d < -half:
-        d += full
-    return d
+    return (curr - prev + half) % full - half
 
 
 def wheel_translation_delta(left_prev, left_now, right_prev, right_now):
@@ -142,6 +140,12 @@ def angle_delta(target, current):
 def normalize_heading(heading):
     """Normalize a heading to [-180, 180)."""
     return (heading + 180) % 360 - 180
+
+
+def tracked_turn_steps(degrees):
+    """Split a turn so each yaw delta remains unambiguous."""
+    count = max(1, math.ceil(abs(degrees) / MAX_TRACKED_TURN_DEG))
+    return [degrees / count] * count
 
 
 def validate_odometry(action, requested, distance_mm, heading_delta):
@@ -180,6 +184,18 @@ def accepted_runs(data):
         for run in data.get('runs', [])
         if run.get('status', 'accepted') in {'accepted', 'partial'}
     ]
+
+
+def run_pose_trustworthy(run):
+    """Return whether a run's final saved pose is safe to navigate from."""
+    quality = run.get('quality', {})
+    if not quality.get('tracking_lost', False):
+        return True
+    return (
+        run.get('mode') == 'go_home'
+        and quality.get('rejected_updates', 0) == 0
+        and quality.get('issues') == ['go-home leg stopped early']
+    )
 
 
 def map_knowledge(data):
@@ -304,6 +320,11 @@ def forward_distance_for_remaining(remaining_seconds):
     ))
 
 
+def home_leg_distance(distance_mm):
+    """Return an integer distance accepted by Dash's move packet encoder."""
+    return max(1, int(round(min(HOME_MAX_LEG_MM, distance_mm))))
+
+
 def read_settled(getter, stable=3, tol=2, timeout=2.0, poll=0.05):
     """Return a sensor reading after its post-motion transient settles."""
     history = []
@@ -417,9 +438,12 @@ def simplify_home_route(route):
 def plan_home_route(data):
     """Return the shortest route home along previously traversed path segments."""
     latest_run = data.get('runs', [])[-1] if data.get('runs') else None
-    if not latest_run or latest_run.get('status', 'accepted') != 'accepted':
-        raise ValueError("go-home requires the map's latest run to be accepted")
-    if latest_run.get('quality', {}).get('tracking_lost'):
+    if not latest_run or latest_run.get('status', 'accepted') not in {
+        'accepted',
+        'partial',
+    }:
+        raise ValueError("go-home requires an accepted or safely aborted latest run")
+    if not run_pose_trustworthy(latest_run):
         raise ValueError("go-home requires a trustworthy final saved pose")
 
     runs = [run for run in accepted_runs(data) if run.get('path')]
@@ -530,7 +554,7 @@ def dock_to_corner(deg_per_yaw, mm_per_wd):
 
     # -- Step 2: turn left, crawl into side wall --
     print("  Turning left to find side wall...")
-    send_command('turn', -90)
+    send_command('turn', 90)
     time.sleep(0.2)
 
     print("  Crawling into side wall...")
@@ -554,7 +578,7 @@ def dock_to_corner(deg_per_yaw, mm_per_wd):
 
     # -- Step 3: turn right to face into room --
     print("  Turning to face room...")
-    send_command('turn', 90)
+    send_command('turn', -90)
     time.sleep(0.3)
 
     # Robot is now at approximately (DOCK_CLEARANCE_MM, DOCK_CLEARANCE_MM)
@@ -579,13 +603,14 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     path = [(x, y, heading)]
     events = []
     issues = []
+    odometry_rejected = False
 
     def update_pose(action, requested):
-        nonlocal x, y, heading, yaw_prev, left_prev, right_prev
+        nonlocal x, y, heading, yaw_prev, left_prev, right_prev, odometry_rejected
         yaw_now = read_settled('get_yaw')
         left_now = read_settled('get_left_wheel')
         right_now = read_settled('get_right_wheel')
-        d_yaw = wrap_delta(yaw_prev, yaw_now, 16)
+        d_yaw = wrap_delta(yaw_prev, yaw_now, 12)
         left_delta = wrap_delta(left_prev, left_now, 16)
         right_delta = wrap_delta(right_prev, right_now, 16)
         distance_mm = ((left_delta + right_delta) / 2) * mm_per_wd
@@ -610,6 +635,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
         if event_issues:
             event['issues'] = event_issues
             issues.extend(event_issues)
+            odometry_rejected = True
         else:
             heading = normalize_heading(heading + heading_delta)
             hr = math.radians(heading)
@@ -621,10 +647,17 @@ def go_home(data, deg_per_yaw, mm_per_wd):
 
     def turn_to(target_heading):
         turn = angle_delta(target_heading, heading)
-        if abs(turn) < 2:
+        if abs(turn) < MIN_TRACKED_TURN_DEG:
             return True
-        send_command('turn', turn)
-        return update_pose('turn', turn) is not None
+        for step in tracked_turn_steps(turn):
+            send_command('turn', step)
+            previous_heading = heading
+            if update_pose('turn', step) is None:
+                return False
+            if abs(angle_delta(heading, previous_heading)) < abs(step) * 0.5:
+                issues.append('go-home turn did not execute')
+                return False
+        return True
 
     print("\n=== Going home ===")
     print(
@@ -642,17 +675,38 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                 if not turn_to(target_heading):
                     completed = False
                     break
-                requested = min(
-                    HOME_MAX_LEG_MM,
-                    math.hypot(waypoint_x - x, waypoint_y - y),
+                requested = home_leg_distance(
+                    math.hypot(waypoint_x - x, waypoint_y - y)
                 )
-                send_command(
+                response = send_command(
                     'move',
                     requested,
                     FORWARD_SPEED_MMPS,
                     wall_stop_sound=None,
                 )
+                if response.get('ok', True) is False:
+                    issues.append(f"go-home move command failed: {response['error']}")
+                    completed = False
+                    break
                 traveled = update_pose('forward', requested)
+                if traveled is not None and abs(traveled) < 1:
+                    time.sleep(HOME_CLEAR_RETRY_DELAY)
+                    left = send_command('get_prox_left')['result']
+                    right = send_command('get_prox_right')['result']
+                    if left < PROX_THRESHOLD and right < PROX_THRESHOLD:
+                        response = send_command(
+                            'move',
+                            requested,
+                            FORWARD_SPEED_MMPS,
+                            wall_stop_sound=None,
+                        )
+                        if response.get('ok', True) is False:
+                            issues.append(
+                                f"go-home move command failed: {response['error']}"
+                            )
+                            completed = False
+                            break
+                        traveled = update_pose('forward', requested)
                 if traveled is None or traveled < requested * 0.8:
                     issues.append('go-home leg stopped early')
                     completed = False
@@ -690,7 +744,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
         'quality': {
             'accepted_updates': sum(event['accepted'] for event in events),
             'rejected_updates': sum(not event['accepted'] for event in events),
-            'tracking_lost': not completed,
+            'tracking_lost': odometry_rejected,
             'issues': issues,
         },
         'planned_route': route,
@@ -752,7 +806,7 @@ def explore(
         yaw_now = read_settled('get_yaw')
         left_now = read_settled('get_left_wheel')
         right_now = read_settled('get_right_wheel')
-        d_yaw = wrap_delta(yaw_prev, yaw_now, 16)
+        d_yaw = wrap_delta(yaw_prev, yaw_now, 12)
         left_delta = wrap_delta(left_prev, left_now, 16)
         right_delta = wrap_delta(right_prev, right_now, 16)
         d_dist = (left_delta + right_delta) / 2
@@ -806,9 +860,12 @@ def explore(
             require_turn=require_turn,
         )
         print(f'\n  [{reason}] map-guided turn {turn_angle:+.0f}°')
-        if turn_angle:
-            send_command('turn', turn_angle)
-            update_pose('turn', turn_angle)
+        for step in tracked_turn_steps(turn_angle):
+            if not step:
+                continue
+            send_command('turn', step)
+            if update_pose('turn', step) is None:
+                break
 
     def redirect(reason, sounds=None, back_away=False, left=0, right=0):
         print(f'\n  [{reason}] changing direction')

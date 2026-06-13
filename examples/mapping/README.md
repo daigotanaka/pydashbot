@@ -54,11 +54,24 @@ observing consistently inaccurate turns or distances.
 For a consistent map origin, place Dash near a room corner:
 
 1. Point its back roughly toward one wall.
-2. Put its left side roughly toward the adjacent wall.
-3. Leave enough clearance for the docking movements.
+2. Put its left side roughly toward the adjacent wall. Dash always turns left
+   during docking, so this turn should make its front face the adjacent wall.
+3. Leave roughly 100-200 mm of clearance from both walls for docking.
+4. Point its front diagonally into the open room.
+5. Ensure the head tip and proximity sensors are unobstructed.
+6. Clear nearby cables, small objects, stairs, and drop-offs.
 
-The mapper first docks against both walls to establish the starting pose and
-orientation, then explores until the requested duration ends:
+The mapper uses this fixed docking sequence to establish the starting pose and
+orientation:
+
+1. Reverse until the rear proximity sensor detects the first wall.
+2. Move forward 80 mm to clear that wall.
+3. Turn left 90 degrees.
+4. Drive forward until a front proximity sensor detects the adjacent wall.
+5. Reverse 80 mm to clear that wall.
+6. Turn right 90 degrees to face into the room.
+
+It then explores until the requested duration ends:
 
 ```bash
 uv run --extra tools examples/mapping/map_room.py \
@@ -73,6 +86,8 @@ mapper creates a timestamped file such as
 `room_map_20260612-17-23-26.json`.
 
 The mapper also renders a PNG beside the JSON using the same basename.
+
+After exploration, do not manually move Dash before running `--go-home`.
 
 ## Go Home
 
