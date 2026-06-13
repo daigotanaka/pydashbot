@@ -287,7 +287,18 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(run["path"][-1][0], 0)
         self.assertAlmostEqual(run["path"][-1][1], 0)
         self.assertAlmostEqual(run["path"][-1][2], 0)
-        self.assertIn(("move", (1000, map_room.FORWARD_SPEED_MMPS), {"wall_stop_sound": None}), calls)
+        self.assertIn(
+            (
+                "move",
+                (1000, map_room.FORWARD_SPEED_MMPS),
+                {
+                    "wall_stop_sound": None,
+                    "proximity_threshold": map_room.HOME_RETRACE_PROX_THRESHOLD,
+                    "proximity_confirm_count": map_room.HOME_RETRACE_CONFIRM_COUNT,
+                },
+            ),
+            calls,
+        )
 
     def test_latest_map_file_includes_legacy_map(self):
         with TemporaryDirectory() as directory:

@@ -60,6 +60,11 @@ BLOCKED_EDGE_TOLERANCE_MM = 150
 HOME_WALL_CLEARANCE_MM = 120        # short nudge to step off a wall just turned from
 HOME_CLEARANCE_SPEED_MMPS = 80
 HOME_CLEARANCE_MIN_TURN_DEG = 120   # only a near-reversal turn faces a wall left behind
+# Relaxed obstacle criteria while retracing a proven corridor home. A higher
+# threshold and a longer confirmation streak let Dash graze walls it already
+# drove past, while a solid head-on wall (which reads far higher) still stops it.
+HOME_RETRACE_PROX_THRESHOLD = 22
+HOME_RETRACE_CONFIRM_COUNT = 6
 MAX_TRACKED_TURN_DEG = 90
 MIN_TRACKED_TURN_DEG = 20
 HOME_CLEAR_RETRY_DELAY = 0.3
@@ -860,6 +865,8 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                     requested,
                     FORWARD_SPEED_MMPS,
                     wall_stop_sound=None,
+                    proximity_threshold=HOME_RETRACE_PROX_THRESHOLD,
+                    proximity_confirm_count=HOME_RETRACE_CONFIRM_COUNT,
                 )
                 if response.get('ok', True) is False:
                     issues.append(f"go-home move command failed: {response['error']}")
@@ -871,12 +878,14 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                     time.sleep(HOME_CLEAR_RETRY_DELAY)
                     left = send_command('get_prox_left')['result']
                     right = send_command('get_prox_right')['result']
-                    if left < PROX_THRESHOLD and right < PROX_THRESHOLD:
+                    if left < HOME_RETRACE_PROX_THRESHOLD and right < HOME_RETRACE_PROX_THRESHOLD:
                         response = send_command(
                             'move',
                             requested,
                             FORWARD_SPEED_MMPS,
                             wall_stop_sound=None,
+                            proximity_threshold=HOME_RETRACE_PROX_THRESHOLD,
+                            proximity_confirm_count=HOME_RETRACE_CONFIRM_COUNT,
                         )
                         if response.get('ok', True) is False:
                             issues.append(
