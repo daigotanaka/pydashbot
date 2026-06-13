@@ -21,38 +21,28 @@ class MappingStrategyTests(unittest.TestCase):
             Path("room_map_20260612-14-05-09.png"),
         )
 
-    def test_output_argument_accepts_exact_file_path(self):
+    def test_calibration_output_argument_accepts_exact_file_path(self):
         self.assertEqual(
             calibrate.parse_args(["--output", "data/my_calibration.json"]).output,
             "data/my_calibration.json",
         )
-        self.assertEqual(
-            map_room.parse_args(["--output", "data/my_map.json"]).output,
-            "data/my_map.json",
-        )
 
-    def test_duration_argument_accepts_positive_seconds(self):
-        self.assertEqual(map_room.parse_args([]).duration, 60)
-        self.assertEqual(map_room.parse_args(["--duration", "90"]).duration, 90)
-        self.assertEqual(map_room.parse_args(["--duration", "2.5"]).duration, 2.5)
-        with self.assertRaises(SystemExit):
-            map_room.parse_args(["--duration", "0"])
+    def test_mapping_config_requires_positive_duration(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.json"
+            config.write_text('{"map_file":"map.json","duration_seconds":0}')
+            with self.assertRaises(SystemExit):
+                map_room.parse_args(["start", "--config", str(config)])
 
-    def test_conservative_exploration_can_be_disabled(self):
-        self.assertFalse(map_room.parse_args([]).no_conservative_exploration)
-        self.assertTrue(
-            map_room.parse_args(
-                ["--no-conservative-exploration"]
-            ).no_conservative_exploration
-        )
+    def test_default_mapping_config_uses_conservative_exploration(self):
+        self.assertFalse(map_room.parse_args(["start"]).no_conservative_exploration)
 
-    def test_mapping_config_sets_mode_and_run_options(self):
+    def test_mapping_config_sets_reusable_run_options(self):
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.json"
             config.write_text(
                 json.dumps(
                     {
-                        "mode": "go_home",
                         "map_file": "data/room_map.json",
                         "calibration": "data/calibration.json",
                         "duration_seconds": 300,
@@ -63,53 +53,49 @@ class MappingStrategyTests(unittest.TestCase):
                 )
             )
 
-            options = map_room.parse_args(["--config", str(config)])
+            options = map_room.parse_args(["dock", "--config", str(config)])
 
-        self.assertEqual(options.go_home, "data/room_map.json")
+        self.assertEqual(options.mode, "dock")
+        self.assertEqual(options.map_file, "data/room_map.json")
         self.assertEqual(options.calibration, "data/calibration.json")
         self.assertEqual(options.duration, 300)
         self.assertTrue(options.no_conservative_exploration)
         self.assertEqual(options.territory_size, 1500)
         self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
 
-    def test_explicit_cli_options_override_mapping_config(self):
+    def test_custom_config_file_is_selected_from_cli(self):
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.json"
             config.write_text(
                 json.dumps(
                     {
-                        "mode": "go_home",
-                        "map_file": "old.json",
+                        "map_file": "new.json",
                         "duration_seconds": 300,
                         "go_home_strategy": "hard-blocked-edge",
                     }
                 )
             )
 
-            options = map_room.parse_args(
-                [
-                    "--config",
-                    str(config),
-                    "--resume",
-                    "new.json",
-                    "--duration",
-                    "45",
-                    "--go-home-strategy",
-                    "d-star-lite",
-                ]
-            )
+            options = map_room.parse_args(["resume", "--config", str(config)])
 
-        self.assertIsNone(options.go_home)
-        self.assertEqual(options.resume, "new.json")
-        self.assertEqual(options.duration, 45)
-        self.assertEqual(options.go_home_strategy, "d-star-lite")
+        self.assertEqual(options.mode, "resume")
+        self.assertEqual(options.map_file, "new.json")
+        self.assertEqual(options.duration, 300)
+        self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
 
     def test_mapping_config_rejects_unknown_settings(self):
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.json"
             config.write_text('{"mystery": true}')
             with self.assertRaises(SystemExit):
-                map_room.parse_args(["--config", str(config)])
+                map_room.parse_args(["start", "--config", str(config)])
+
+    def test_mapping_config_requires_map_file(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.json"
+            config.write_text('{"duration_seconds": 60}')
+            with self.assertRaises(SystemExit):
+                map_room.parse_args(["start", "--config", str(config)])
 
     def test_latest_calibration_file_uses_timestamped_name(self):
         with TemporaryDirectory() as directory:
@@ -121,38 +107,27 @@ class MappingStrategyTests(unittest.TestCase):
                 path.write_text("{}")
             self.assertEqual(map_room.latest_calibration_file(root), newer)
 
-    def test_go_home_argument_accepts_latest_or_explicit_map(self):
-        self.assertEqual(map_room.parse_args(["--go-home"]).go_home, "latest")
-        self.assertEqual(
-            map_room.parse_args(["--go-home", "room_map.json"]).go_home,
-            "room_map.json",
-        )
-        self.assertEqual(
-            map_room.parse_args(["--start-with-map"]).start_with_map,
-            "latest",
-        )
-        self.assertEqual(
-            map_room.parse_args(
-                ["--start-with-map", "room_map.json"]
-            ).start_with_map,
-            "room_map.json",
-        )
-        self.assertEqual(
-            map_room.parse_args(
-                ["--start-with-map", "room_map.json", "--calibration", "calibration.json"]
-            ).calibration,
-            "calibration.json",
-        )
-        self.assertEqual(
-            map_room.parse_args(["--go-home"]).go_home_strategy,
-            "d-star-lite",
-        )
-        self.assertEqual(
-            map_room.parse_args(
-                ["--go-home", "room_map.json", "--go-home-strategy", "hard-blocked-edge"]
-            ).go_home_strategy,
-            "hard-blocked-edge",
-        )
+    def test_mapping_run_mode_is_positional(self):
+        self.assertEqual(map_room.parse_args(["start"]).mode, "start")
+        self.assertEqual(map_room.parse_args(["resume"]).mode, "resume")
+        self.assertEqual(map_room.parse_args(["dock"]).mode, "dock")
+        with self.assertRaises(SystemExit):
+            map_room.parse_args(["go_home"])
+
+    def test_resume_and_dock_require_configured_map_before_robot_commands(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.json"
+            config.write_text(
+                json.dumps({"map_file": str(Path(directory) / "missing.json")})
+            )
+            for mode in ("resume", "dock"):
+                with (
+                    self.subTest(mode=mode),
+                    patch.object(map_room, "send_command") as send_command,
+                    self.assertRaisesRegex(ValueError, "requires existing map file"),
+                ):
+                    map_room.main([mode, "--config", str(config)])
+                send_command.assert_not_called()
 
     def test_load_resume_state_uses_last_pose_and_map_calibration(self):
         with TemporaryDirectory() as directory:

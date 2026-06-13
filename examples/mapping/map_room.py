@@ -133,16 +133,14 @@ GO_HOME_STRATEGIES = {
     LEGACY_GO_HOME_STRATEGY.name: LEGACY_GO_HOME_STRATEGY,
 }
 MAPPING_CONFIG_KEYS = {
-    'mode',
     'map_file',
     'calibration',
-    'output',
     'duration_seconds',
     'conservative_exploration',
     'territory_size_mm',
     'go_home_strategy',
 }
-MAPPING_MODES = {'explore', 'go_home', 'start_with_map', 'resume'}
+DEFAULT_MAPPING_CONFIG = Path(__file__).with_name('config') / 'config.json'
 
 WALL_SOUNDS   = ['ohno', 'ayayay', 'huh', 'confused2', 'confused3']
 TILT_SOUNDS   = ['ayayay', 'ohno', 'confused5', 'confused8']
@@ -152,86 +150,21 @@ RESUME_SOUNDS = ['okay', 'wee']
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        'mode',
+        choices=('start', 'resume', 'dock'),
+        help=(
+            "start a docked mapping run, resume from the map's final pose, "
+            "or return home from the map's final pose"
+        ),
+    )
+    parser.add_argument(
         '--config',
         metavar='CONFIG_FILE',
-        help="load mapping settings from a JSON config file; explicit flags override it",
-    )
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        '--go-home',
-        nargs='?',
-        const='latest',
-        metavar='MAP_FILE',
-        help=(
-            "return from MAP_FILE's final saved pose to its initial pose and "
-            "orientation; without MAP_FILE, use the newest room map"
-        ),
-    )
-    mode.add_argument(
-        '--start-with-map',
-        nargs='?',
-        const='latest',
-        metavar='MAP_FILE',
-        help=(
-            "corner-dock at the normal starting point, then append to MAP_FILE "
-            "using its knowledge to choose exploration headings"
-        ),
-    )
-    mode.add_argument(
-        '--resume',
-        nargs='?',
-        const='latest',
-        metavar='MAP_FILE',
-        help=(
-            "continue exploring from MAP_FILE's final saved pose without "
-            "docking; without MAP_FILE, use the newest room map"
-        ),
-    )
-    parser.add_argument(
-        '--go-home-strategy',
-        choices=GO_HOME_STRATEGIES,
-        default=None,
-        help="route replanning strategy used by --go-home",
-    )
-    parser.add_argument(
-        '--calibration',
-        metavar='CAL_FILE',
-        help="override the calibration scales with CAL_FILE",
-    )
-    parser.add_argument(
-        '--output',
-        metavar='FILE_PATH',
-        help=(
-            "write map JSON to FILE_PATH and its image beside it; "
-            "otherwise use the selected map or a timestamped filename"
-        ),
-    )
-    parser.add_argument(
-        '--duration',
-        type=positive_seconds,
-        default=None,
-        metavar='SECONDS',
-        help=f"exploration run time in seconds (default: {DURATION})",
-    )
-    parser.add_argument(
-        '--no-conservative-exploration',
-        action='store_true',
-        default=None,
-        help="disable the experimental bounded-territory exploration policy",
-    )
-    parser.add_argument(
-        '--territory-size',
-        type=positive_mm,
-        default=None,
-        metavar='MM',
-        help=(
-            "side length in mm of each conservative-exploration territory "
-            f"(default: {TERRITORY_MM}); smaller territories unlock sooner and "
-            "resolve walled-off cells at finer granularity"
-        ),
+        default=str(DEFAULT_MAPPING_CONFIG),
+        help=f"load JSON settings from CONFIG_FILE (default: {DEFAULT_MAPPING_CONFIG})",
     )
     options = parser.parse_args(args)
-    config = load_mapping_config(Path(options.config), parser) if options.config else {}
+    config = load_mapping_config(Path(options.config), parser)
     apply_mapping_config(options, config, parser)
     return options
 
@@ -253,39 +186,22 @@ def load_mapping_config(config_file, parser):
 
 
 def apply_mapping_config(options, config, parser):
-    """Merge config defaults into parsed CLI options, preserving CLI overrides."""
-    cli_mode = next(
-        (
-            name
-            for name in ('go_home', 'start_with_map', 'resume')
-            if getattr(options, name) is not None
-        ),
-        None,
+    """Apply validated config values to parsed run-mode options."""
+    map_file = config.get('map_file')
+    if not isinstance(map_file, str) or not map_file.strip():
+        parser.error("config map_file must be a non-empty file path")
+    options.map_file = map_file
+    options.calibration = config.get('calibration')
+    options.duration = config.get('duration_seconds', DURATION)
+    options.territory_size = config.get('territory_size_mm', TERRITORY_MM)
+    options.go_home_strategy = config.get(
+        'go_home_strategy', ACTIVE_GO_HOME_STRATEGY.name
     )
-    config_mode = config.get('mode', 'explore')
-    if config_mode not in MAPPING_MODES:
-        parser.error(f"config mode must be one of: {', '.join(sorted(MAPPING_MODES))}")
-    if cli_mode is None and config_mode != 'explore':
-        setattr(options, config_mode, config.get('map_file') or 'latest')
-
-    defaults = {
-        'calibration': config.get('calibration'),
-        'output': config.get('output'),
-        'duration': config.get('duration_seconds', DURATION),
-        'territory_size': config.get('territory_size_mm', TERRITORY_MM),
-        'go_home_strategy': config.get(
-            'go_home_strategy', ACTIVE_GO_HOME_STRATEGY.name
-        ),
-    }
-    for name, value in defaults.items():
-        if getattr(options, name) is None:
-            setattr(options, name, value)
 
     conservative = config.get('conservative_exploration', True)
     if not isinstance(conservative, bool):
         parser.error("config conservative_exploration must be true or false")
-    if options.no_conservative_exploration is None:
-        options.no_conservative_exploration = not conservative
+    options.no_conservative_exploration = not conservative
 
     try:
         options.duration = positive_seconds(options.duration)
@@ -1579,7 +1495,10 @@ def save_map(
 # ---------------------------------------------------------------------------
 def main(args=None):
     options = parse_args(args)
-    run_started = datetime.now()
+    map_file = Path(options.map_file)
+    if options.mode in {'resume', 'dock'} and not map_file.exists():
+        raise ValueError(f"{options.mode} requires existing map file {map_file}")
+
     send_command('stop')
     time.sleep(1.0)
     calibration_override = (
@@ -1590,23 +1509,14 @@ def main(args=None):
 
     strategy_map = {}
     source_map_file = None
-    if options.go_home or options.resume:
-        selected_map = options.go_home or options.resume
-        source_map_file = (
-            latest_map_file()
-            if selected_map == 'latest'
-            else Path(selected_map)
-        )
+    if options.mode in {'resume', 'dock'}:
+        source_map_file = map_file
         strategy_map = load_map_data(source_map_file)
         deg_per_yaw, mm_per_wd, x0, y0, heading0 = load_resume_state(source_map_file)
         if calibration_override:
             deg_per_yaw, mm_per_wd = calibration_override
-    elif options.start_with_map:
-        source_map_file = (
-            latest_map_file()
-            if options.start_with_map == 'latest'
-            else Path(options.start_with_map)
-        )
+    elif map_file.exists():
+        source_map_file = map_file
         strategy_map = load_map_data(source_map_file)
         calibration = strategy_map['calibration']
         deg_per_yaw = calibration['deg_per_yaw']
@@ -1627,15 +1537,9 @@ def main(args=None):
         x0, y0 = dock_to_corner(deg_per_yaw, mm_per_wd)
         heading0 = 0.0
 
-    if options.output:
-        map_file = Path(options.output)
-    elif source_map_file:
-        map_file = source_map_file
-    else:
-        map_file = timestamped_path('room_map', '.json', run_started)
     img_path = map_file.with_suffix('.png')
 
-    if options.go_home:
+    if options.mode == 'dock':
         produced_runs = go_home_with_retries(
             strategy_map,
             deg_per_yaw,

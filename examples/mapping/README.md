@@ -28,23 +28,13 @@ and mapping scripts use the running server instead of connecting directly.
 
 ## Configuration
 
-Normal mapping runs can be described in one JSON file instead of a long command
-line. The provided [`config/config.json`](config/config.json) is set up for the current
-`data/room_map.json` and D* Lite go-home strategy. Edit it, then run:
-
-```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --config examples/mapping/config/config.json
-```
-
-The config supports:
+The provided [`config/config.json`](config/config.json) stores the map path and
+reusable mapping settings:
 
 ```json
 {
-  "mode": "explore",
-  "map_file": null,
-  "calibration": null,
-  "output": null,
+  "map_file": "data/room_map.json",
+  "calibration": "data/calibration/calibration_20260612.json",
   "duration_seconds": 60,
   "conservative_exploration": true,
   "territory_size_mm": 1000,
@@ -52,11 +42,20 @@ The config supports:
 }
 ```
 
-`mode` is one of `explore`, `go_home`, `start_with_map`, or `resume`.
-`map_file` selects the map for every mode except fresh `explore`; use `null` to
-select the newest map. Paths are interpreted relative to the working directory.
-Individual CLI flags remain available as temporary overrides and take precedence
-over config values.
+Choose one positional run mode:
+
+```bash
+uv run --extra tools examples/mapping/map_room.py start
+uv run --extra tools examples/mapping/map_room.py resume
+uv run --extra tools examples/mapping/map_room.py dock
+```
+
+- `start`: dock at the starting corner. If `map_file` exists, reuse and extend
+  it; otherwise create a new map at that path.
+- `resume`: require `map_file` and continue exploring from its final saved pose.
+- `dock`: require `map_file` and return home from its final saved pose.
+
+Use `--config FILE` only to select a different config file.
 
 ## Calibration
 
@@ -106,10 +105,7 @@ orientation:
 It then explores until the requested duration ends:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --calibration data/calibration.json \
-  --output data/room_map.json \
-  --duration 300
+uv run --extra tools examples/mapping/map_room.py start
 ```
 
 By default the mapper explores with the conservative-territory policy (see
@@ -120,29 +116,26 @@ than re-driving cells it has already visited. Each leg stops early on a wall, a
 tilt, or a territory boundary; odometry is validated after every command and
 loop-closure corrections against known landmarks bound the drift. As cells are
 resolved the policy unlocks adjacent territory so the explored region grows
-compactly. Pass `--no-conservative-exploration` for undirected forward legs, or
-`--territory-size MM` to change the territory granularity.
+compactly. Set `conservative_exploration` to `false` for undirected forward
+legs, or change `territory_size_mm` to adjust the territory granularity.
 
-`--duration` is measured in seconds and defaults to 60. A fresh run with
-`--output` replaces an existing file at that path. Without `--output`, the
-mapper creates a timestamped file such as
-`room_map_20260612-17-23-26.json`.
+`duration_seconds` defaults to 60. `start` creates `map_file` when it does not
+exist and appends a new run when it does.
 
 The mapper renders a PNG beside the JSON using the same basename: a cell-grid
 overlay showing the conservative-exploration territories with each cell's
 visited / blocked / unreachable / frontier state, the robot path, and the wall
 observations.
 
-After exploration, do not manually move Dash before running `--go-home`.
+After exploration, do not manually move Dash before running `dock`.
 
-## Go Home
+## Dock
 
 After a fresh exploration, do not manually move the robot. Return it to the
 map's initial position and orientation with:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --go-home data/room_map.json
+uv run --extra tools examples/mapping/map_room.py dock
 ```
 
 Go-home plans along previously traversed path segments. It does not invent
@@ -158,15 +151,10 @@ edges that approach the actual stop position from the same direction. The edge
 remains available as a last resort, avoiding false "no route home" failures
 caused by deleting broad overlapping corridors.
 
-The previous hard-exclusion strategy remains available for A/B testing:
+Set `go_home_strategy` to `hard-blocked-edge` in the config to use the previous
+hard-exclusion strategy for A/B testing.
 
-```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --go-home data/room_map.json \
-  --go-home-strategy hard-blocked-edge
-```
-
-A single `--go-home` invocation replans automatically: if an attempt aborts on a
+A single `dock` invocation replans automatically: if an attempt aborts on a
 blockage while keeping a trustworthy pose, it records the failed approach and
 tries a lower-cost proven route from where Dash stopped, up to a few times.
 Retries stop early if the pose is no longer trustworthy or the halt was not a
@@ -201,46 +189,41 @@ reason and stores it on the run.
 The command refuses to start when the map's latest run does not have a
 trustworthy final pose. The completed or aborted return is appended to the map.
 
-Omit the filename after `--go-home` to use the newest room map in the current
-directory.
+## Start Or Resume
 
-## Start With A Map
-
-To physically start again from the original corner while reusing prior map
-knowledge:
+To physically start again from the original corner, creating or extending the
+configured map:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --start-with-map data/room_map.json \
-  --duration 300
+uv run --extra tools examples/mapping/map_room.py start
 ```
 
-The mapper performs the corner-docking routine, anchors itself to the saved
-starting pose, and chooses headings that favor unexplored space while avoiding
-known walls and obstacles. The new run is appended to the selected map.
+When the configured map exists, the mapper performs the corner-docking routine,
+anchors itself to the saved starting pose, and appends a new run. When it does
+not exist, the mapper creates a fresh map.
 
-Omit the filename after `--start-with-map` to use the newest room map in the
-current directory.
+To continue from the robot's final physical pose without docking:
+
+```bash
+uv run --extra tools examples/mapping/map_room.py resume
+```
 
 ## Recommended Explore-And-Return Session
 
 1. Start the WebSocket server.
-2. Set `mode` to `explore`, choose `calibration` / `output`, and set the desired
-   `duration_seconds` in `examples/mapping/config/config.json`.
+2. Set `map_file`, `calibration`, and `duration_seconds` in
+   `examples/mapping/config/config.json`.
 3. Place Dash at the starting corner and run:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --config examples/mapping/config/config.json
+uv run --extra tools examples/mapping/map_room.py start
 ```
 
 4. Confirm Dash has not been manually moved.
-5. Change `mode` to `go_home`, set `map_file` to the saved map, and run the same
-   command:
+5. Return home:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --config examples/mapping/config/config.json
+uv run --extra tools examples/mapping/map_room.py dock
 ```
 
 ## Map Data And Quality
@@ -353,7 +336,7 @@ Relevant code: `HardBlockedEdgeStrategy` and `DStarLiteStrategy` in
 ### Conservative Exploration
 
 The mapper limits exploration to an initial square territory (1 x 1 meter by
-default; change the side length with `--territory-size MM`). When a forward leg
+default; change `territory_size_mm` in the config). When a forward leg
 approaches the edge of an unlocked territory, it stops short and chooses a new
 direction as though it had reached a mental wall. Smaller territories unlock
 sooner and resolve walled-off cells at finer granularity, because each cell is
@@ -395,18 +378,12 @@ Conservative reachability consumes the same shared segments when enabled.
 
 The mapper reports major progress to stdout with `[cell complete]`,
 `[territory complete]`, and `[adjacent territory unlocked]` messages. Territory
-progress persists across `--start-with-map` runs, and expansion favors nearby
+progress persists across `start` runs, and expansion favors nearby
 uncharted territory so the explored region grows compactly.
 
 This feature is experimental and isolated in
-`examples/mapping/conservative_exploration.py`. Disable it without changing
-other planning behavior:
-
-```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --calibration data/calibration.json \
-  --no-conservative-exploration
-```
+`examples/mapping/conservative_exploration.py`. Set
+`conservative_exploration` to `false` to disable it.
 
 The core explorer interacts with the policy only through optional hooks for
 heading constraints, forward-distance limits, progress reporting, territory
@@ -524,11 +501,18 @@ Relevant code: `validate_odometry` (and the `TRACK_WIDTH_MM` /
 Run from the mapping config:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py \
-  --config examples/mapping/config/config.json
+uv run --extra tools examples/mapping/map_room.py start
+uv run --extra tools examples/mapping/map_room.py resume
+uv run --extra tools examples/mapping/map_room.py dock
 ```
 
-Show all mapper overrides:
+Use a different config:
+
+```bash
+uv run --extra tools examples/mapping/map_room.py start --config path/to/config.json
+```
+
+Show mapper usage:
 
 ```bash
 uv run --extra tools examples/mapping/map_room.py --help
