@@ -495,27 +495,37 @@ def edge_is_blocked(
 ):
     """Return whether a graph edge runs along a recorded blocked segment.
 
-    The edge must overlap the blocked corridor (its midpoint falls near the
-    segment) and run roughly parallel to it. A perpendicular crossing into a
-    different corridor stays usable, and a degenerate coincident link is kept so
-    the proximity graph remains connected at the blocked corridor's endpoints.
+    The edge must overlap the blocked corridor and run roughly parallel to it.
+    Overlap requires the edge midpoint to project onto the *interior* of the
+    blocked segment (not merely near one of its endpoints), so a long proven
+    corridor that only shares an endpoint with — or runs past the end of — the
+    blocked segment is not excluded. A perpendicular crossing into a different
+    corridor stays usable, and a degenerate coincident link is kept so the
+    proximity graph remains connected at the blocked corridor's endpoints.
     """
     ex, ey = second_point[0] - first_point[0], second_point[1] - first_point[1]
     edge_len = math.hypot(ex, ey)
     if edge_len < 1:
         return False
-    midpoint = (
-        (first_point[0] + second_point[0]) / 2,
-        (first_point[1] + second_point[1]) / 2,
-    )
+    mx = (first_point[0] + second_point[0]) / 2
+    my = (first_point[1] + second_point[1]) / 2
     for seg_start, seg_end in blocked_edges:
-        if not _point_near_segment(midpoint, seg_start, seg_end, tolerance):
-            continue
         sx, sy = seg_end[0] - seg_start[0], seg_end[1] - seg_start[1]
-        seg_len = math.hypot(sx, sy)
-        if seg_len < 1:
-            return True
-        alignment = abs(ex * sx + ey * sy) / (edge_len * seg_len)
+        seg_len_sq = sx * sx + sy * sy
+        if seg_len_sq == 0:
+            if math.hypot(mx - seg_start[0], my - seg_start[1]) <= tolerance:
+                return True
+            continue
+        # Project the edge midpoint onto the blocked segment. Require the
+        # projection to land within the segment's span, so an edge that merely
+        # shares an endpoint and extends away is not treated as blocked.
+        t = ((mx - seg_start[0]) * sx + (my - seg_start[1]) * sy) / seg_len_sq
+        if t < 0 or t > 1:
+            continue
+        cx, cy = seg_start[0] + t * sx, seg_start[1] + t * sy
+        if math.hypot(mx - cx, my - cy) > tolerance:
+            continue
+        alignment = abs(ex * sx + ey * sy) / (edge_len * math.sqrt(seg_len_sq))
         if alignment >= math.cos(math.radians(30)):
             return True
     return False

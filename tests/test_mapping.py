@@ -186,6 +186,19 @@ class MappingStrategyTests(unittest.TestCase):
         # A corridor crossing the blocked segment perpendicularly is still usable.
         self.assertFalse(map_room.edge_is_blocked((500, -300), (500, 300), blocked))
 
+    def test_blocked_edge_does_not_over_block_parallel_proven_corridor(self):
+        # Real recorded case: a go-home block on (532,25)->(738,69) must not
+        # exclude the proven corridor (80,80)->(738,69) that shares an endpoint
+        # and runs past the blocked segment's far end.
+        blocked = [((532, 25), (738, 69))]
+        self.assertFalse(
+            map_room.edge_is_blocked((80, 80), (738, 69), blocked)
+        )
+        # The blocked approach itself is still excluded.
+        self.assertTrue(
+            map_room.edge_is_blocked((560, 30), (720, 65), blocked)
+        )
+
     def test_home_route_avoids_blocked_segment(self):
         data = {
             "runs": [

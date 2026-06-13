@@ -306,18 +306,24 @@ only ~23 mm off the proven corridor, so the corridor's clearance is genuinely
 ambiguous — but Dash had traversed it minutes earlier, so the planner should at
 least try it rather than delete it.)
 
-Possible directions:
+Partially addressed: `edge_is_blocked` now requires the candidate edge's
+midpoint to project onto the *interior* of the blocked segment, so an edge that
+merely shares an endpoint with the blocked segment, or runs past its far end, is
+no longer excluded (the endpoint-sharing guard). On the recorded example above,
+`plan_home_route` now returns a route home through the previously over-blocked
+corridor instead of reporting no route.
 
-1. **Tighten the blocked region.** Block a small zone around the actual stop
-   position rather than the whole route leg, reducing collinear bleed onto
-   neighboring corridors.
-2. **Never hard-exclude proven-driven edges.** Distinguish edges Dash actually
-   drove (exploration path segments) from inferred proximity links. Downweight a
-   proven-driven corridor that overlaps a blockage so it becomes a last resort,
-   instead of removing it — "we already drove this" is the strongest evidence of
-   passability.
-3. **Endpoint-sharing guard.** Do not exclude an edge that merely shares an
-   endpoint with the blocked segment and extends away from it.
+Remaining directions:
+
+1. **Tighten the blocked region further.** Block a small zone around the actual
+   stop position rather than the whole route leg, reducing collinear bleed onto
+   genuinely parallel neighboring corridors that still overlap interior-wise.
+2. **Soft costs instead of hard exclusion.** Distinguish edges Dash actually
+   drove (exploration path segments) from inferred proximity links, and
+   downweight a proven-driven corridor that overlaps a blockage so it becomes a
+   last resort instead of removing it — "we already drove this" is the strongest
+   evidence of passability. This also guarantees a route whenever the proven
+   graph is connected.
 
 Safety constraints:
 
