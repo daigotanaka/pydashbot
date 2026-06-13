@@ -10,7 +10,6 @@ Starting ritual (run every session for a consistent origin):
 """
 
 import argparse
-import heapq
 import json
 import math
 import random
@@ -31,6 +30,11 @@ try:
         inferred_wall_segments,
         point_segment_distance,
     )
+    from examples.mapping.go_home_strategies import (
+        DStarLiteStrategy,
+        HardBlockedEdgeStrategy,
+        edge_is_blocked,
+    )
 except ModuleNotFoundError:
     from conservative_exploration import (
         ConservativeExploration,
@@ -41,6 +45,11 @@ except ModuleNotFoundError:
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
+    )
+    from go_home_strategies import (
+        DStarLiteStrategy,
+        HardBlockedEdgeStrategy,
+        edge_is_blocked,
     )
 
 CAL_FILE_PATTERN = 'calibration_????????-??-??-??.json'
@@ -110,6 +119,31 @@ MAX_TRACKED_TURN_DEG = 90
 MIN_TRACKED_TURN_DEG = 20
 HOME_CLEAR_RETRY_DELAY = 0.3
 
+LEGACY_GO_HOME_STRATEGY = HardBlockedEdgeStrategy(
+    HOME_ROUTE_LINK_RADIUS_MM,
+    BLOCKED_EDGE_TOLERANCE_MM,
+    HOME_ROUTE_COLLINEAR_DEG,
+)
+ACTIVE_GO_HOME_STRATEGY = DStarLiteStrategy(
+    HOME_ROUTE_LINK_RADIUS_MM,
+    HOME_ROUTE_COLLINEAR_DEG,
+)
+GO_HOME_STRATEGIES = {
+    ACTIVE_GO_HOME_STRATEGY.name: ACTIVE_GO_HOME_STRATEGY,
+    LEGACY_GO_HOME_STRATEGY.name: LEGACY_GO_HOME_STRATEGY,
+}
+MAPPING_CONFIG_KEYS = {
+    'mode',
+    'map_file',
+    'calibration',
+    'output',
+    'duration_seconds',
+    'conservative_exploration',
+    'territory_size_mm',
+    'go_home_strategy',
+}
+MAPPING_MODES = {'explore', 'go_home', 'start_with_map', 'resume'}
+
 WALL_SOUNDS   = ['ohno', 'ayayay', 'huh', 'confused2', 'confused3']
 TILT_SOUNDS   = ['ayayay', 'ohno', 'confused5', 'confused8']
 RESUME_SOUNDS = ['okay', 'wee']
@@ -117,6 +151,11 @@ RESUME_SOUNDS = ['okay', 'wee']
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--config',
+        metavar='CONFIG_FILE',
+        help="load mapping settings from a JSON config file; explicit flags override it",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         '--go-home',
@@ -149,6 +188,12 @@ def parse_args(args=None):
         ),
     )
     parser.add_argument(
+        '--go-home-strategy',
+        choices=GO_HOME_STRATEGIES,
+        default=None,
+        help="route replanning strategy used by --go-home",
+    )
+    parser.add_argument(
         '--calibration',
         metavar='CAL_FILE',
         help="override the calibration scales with CAL_FILE",
@@ -164,19 +209,20 @@ def parse_args(args=None):
     parser.add_argument(
         '--duration',
         type=positive_seconds,
-        default=DURATION,
+        default=None,
         metavar='SECONDS',
         help=f"exploration run time in seconds (default: {DURATION})",
     )
     parser.add_argument(
         '--no-conservative-exploration',
         action='store_true',
+        default=None,
         help="disable the experimental bounded-territory exploration policy",
     )
     parser.add_argument(
         '--territory-size',
         type=positive_mm,
-        default=TERRITORY_MM,
+        default=None,
         metavar='MM',
         help=(
             "side length in mm of each conservative-exploration territory "
@@ -184,7 +230,73 @@ def parse_args(args=None):
             "resolve walled-off cells at finer granularity"
         ),
     )
-    return parser.parse_args(args)
+    options = parser.parse_args(args)
+    config = load_mapping_config(Path(options.config), parser) if options.config else {}
+    apply_mapping_config(options, config, parser)
+    return options
+
+
+def load_mapping_config(config_file, parser):
+    """Load and validate the mapper's human-editable JSON configuration."""
+    try:
+        config = json.loads(config_file.read_text())
+    except OSError as exc:
+        parser.error(f"cannot read config file {config_file}: {exc}")
+    except json.JSONDecodeError as exc:
+        parser.error(f"invalid JSON in config file {config_file}: {exc}")
+    if not isinstance(config, dict):
+        parser.error(f"config file {config_file} must contain a JSON object")
+    unknown = sorted(set(config) - MAPPING_CONFIG_KEYS)
+    if unknown:
+        parser.error(f"unknown config setting(s): {', '.join(unknown)}")
+    return config
+
+
+def apply_mapping_config(options, config, parser):
+    """Merge config defaults into parsed CLI options, preserving CLI overrides."""
+    cli_mode = next(
+        (
+            name
+            for name in ('go_home', 'start_with_map', 'resume')
+            if getattr(options, name) is not None
+        ),
+        None,
+    )
+    config_mode = config.get('mode', 'explore')
+    if config_mode not in MAPPING_MODES:
+        parser.error(f"config mode must be one of: {', '.join(sorted(MAPPING_MODES))}")
+    if cli_mode is None and config_mode != 'explore':
+        setattr(options, config_mode, config.get('map_file') or 'latest')
+
+    defaults = {
+        'calibration': config.get('calibration'),
+        'output': config.get('output'),
+        'duration': config.get('duration_seconds', DURATION),
+        'territory_size': config.get('territory_size_mm', TERRITORY_MM),
+        'go_home_strategy': config.get(
+            'go_home_strategy', ACTIVE_GO_HOME_STRATEGY.name
+        ),
+    }
+    for name, value in defaults.items():
+        if getattr(options, name) is None:
+            setattr(options, name, value)
+
+    conservative = config.get('conservative_exploration', True)
+    if not isinstance(conservative, bool):
+        parser.error("config conservative_exploration must be true or false")
+    if options.no_conservative_exploration is None:
+        options.no_conservative_exploration = not conservative
+
+    try:
+        options.duration = positive_seconds(options.duration)
+        options.territory_size = positive_mm(options.territory_size)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
+    if options.go_home_strategy not in GO_HOME_STRATEGIES:
+        parser.error(
+            "config go_home_strategy must be one of: "
+            f"{', '.join(GO_HOME_STRATEGIES)}"
+        )
 
 
 def positive_seconds(value):
@@ -586,142 +698,9 @@ def collect_blocked_edges(data):
     return edges
 
 
-def _point_near_segment(point, seg_start, seg_end, tolerance):
-    """Return whether point lies within tolerance of segment seg_start-seg_end."""
-    px, py = point
-    ax, ay = seg_start
-    bx, by = seg_end
-    dx, dy = bx - ax, by - ay
-    seg_len_sq = dx * dx + dy * dy
-    if seg_len_sq == 0:
-        return math.hypot(px - ax, py - ay) <= tolerance
-    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg_len_sq))
-    cx, cy = ax + t * dx, ay + t * dy
-    return math.hypot(px - cx, py - cy) <= tolerance
-
-
-def edge_is_blocked(
-    first_point,
-    second_point,
-    blocked_edges,
-    tolerance=BLOCKED_EDGE_TOLERANCE_MM,
-):
-    """Return whether a graph edge runs along a recorded blocked segment.
-
-    The edge must overlap the blocked corridor and run roughly parallel to it.
-    Overlap requires the edge midpoint to project onto the *interior* of the
-    blocked segment (not merely near one of its endpoints), so a long proven
-    corridor that only shares an endpoint with — or runs past the end of — the
-    blocked segment is not excluded. A perpendicular crossing into a different
-    corridor stays usable, and a degenerate coincident link is kept so the
-    proximity graph remains connected at the blocked corridor's endpoints.
-    """
-    ex, ey = second_point[0] - first_point[0], second_point[1] - first_point[1]
-    edge_len = math.hypot(ex, ey)
-    if edge_len < 1:
-        return False
-    mx = (first_point[0] + second_point[0]) / 2
-    my = (first_point[1] + second_point[1]) / 2
-    for seg_start, seg_end in blocked_edges:
-        sx, sy = seg_end[0] - seg_start[0], seg_end[1] - seg_start[1]
-        seg_len_sq = sx * sx + sy * sy
-        if seg_len_sq == 0:
-            if math.hypot(mx - seg_start[0], my - seg_start[1]) <= tolerance:
-                return True
-            continue
-        # Project the edge midpoint onto the blocked segment. Require the
-        # projection to land within the segment's span, so an edge that merely
-        # shares an endpoint and extends away is not treated as blocked.
-        t = ((mx - seg_start[0]) * sx + (my - seg_start[1]) * sy) / seg_len_sq
-        if t < 0 or t > 1:
-            continue
-        cx, cy = seg_start[0] + t * sx, seg_start[1] + t * sy
-        if math.hypot(mx - cx, my - cy) > tolerance:
-            continue
-        alignment = abs(ex * sx + ey * sy) / (edge_len * math.sqrt(seg_len_sq))
-        if alignment >= math.cos(math.radians(30)):
-            return True
-    return False
-
-
-def plan_home_route(data):
-    """Return the shortest route home along previously traversed path segments."""
-    latest_run = data.get('runs', [])[-1] if data.get('runs') else None
-    if not latest_run or latest_run.get('status', 'accepted') not in {
-        'accepted',
-        'partial',
-    }:
-        raise ValueError("go-home requires an accepted or safely aborted latest run")
-    if not run_pose_trustworthy(latest_run):
-        raise ValueError("go-home requires a trustworthy final saved pose")
-
-    runs = [run for run in accepted_runs(data) if run.get('path')]
-    if not runs:
-        raise ValueError("map does not contain an accepted path home")
-
-    blocked_edges = collect_blocked_edges(data)
-
-    nodes = []
-    adjacency = {}
-    point_lookup = {}
-
-    def link(first, second, distance):
-        if edge_is_blocked(point_lookup[first], point_lookup[second], blocked_edges):
-            return
-        adjacency[first].append((second, distance))
-        adjacency[second].append((first, distance))
-
-    for run_index, run in enumerate(runs):
-        run_nodes = []
-        for point_index, point in enumerate(run['path']):
-            node = (run_index, point_index)
-            position = (float(point[0]), float(point[1]))
-            nodes.append((node, position))
-            point_lookup[node] = position
-            adjacency[node] = []
-            run_nodes.append(node)
-        for first, second in zip(run_nodes, run_nodes[1:]):
-            link(first, second, math.dist(point_lookup[first], point_lookup[second]))
-
-    for index, (first, first_point) in enumerate(nodes):
-        for second, second_point in nodes[index + 1:]:
-            if first[0] == second[0] and abs(first[1] - second[1]) <= 1:
-                continue
-            distance = math.dist(first_point, second_point)
-            if distance <= HOME_ROUTE_LINK_RADIUS_MM:
-                link(first, second, distance)
-
-    start = (len(runs) - 1, len(runs[-1]['path']) - 1)
-    goal = (0, 0)
-    distances = {start: 0.0}
-    previous = {}
-    queue = [(0.0, start)]
-    while queue:
-        distance, node = heapq.heappop(queue)
-        if node == goal:
-            break
-        if distance != distances.get(node):
-            continue
-        for neighbor, edge_distance in adjacency[node]:
-            candidate = distance + edge_distance
-            if candidate < distances.get(neighbor, math.inf):
-                distances[neighbor] = candidate
-                previous[neighbor] = node
-                heapq.heappush(queue, (candidate, neighbor))
-
-    if goal not in distances:
-        if blocked_edges:
-            raise ValueError(
-                "no unblocked proven route home remains; "
-                f"{len(blocked_edges)} known route segment(s) are blocked"
-            )
-        raise ValueError("accepted map paths do not connect back to the starting pose")
-
-    route_nodes = [goal]
-    while route_nodes[-1] != start:
-        route_nodes.append(previous[route_nodes[-1]])
-    route_nodes.reverse()
-    return simplify_home_route([point_lookup[node] for node in route_nodes])
+def plan_home_route(data, strategy=ACTIVE_GO_HOME_STRATEGY):
+    """Return the route selected by the requested go-home strategy."""
+    return strategy.plan_route(data, accepted_runs, run_pose_trustworthy)
 
 
 # ---------------------------------------------------------------------------
@@ -886,9 +865,9 @@ def needs_wall_clearance(leg_turn_deg, prox_left, prox_right, threshold=PROX_THR
     return abs(leg_turn_deg) >= HOME_CLEARANCE_MIN_TURN_DEG and front >= threshold
 
 
-def go_home(data, deg_per_yaw, mm_per_wd):
-    """Follow the shortest known-safe route back to the map's initial pose."""
-    route = plan_home_route(data)
+def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
+    """Follow the route selected by a go-home strategy."""
+    route = plan_home_route(data, strategy)
     start_x, start_y, start_heading = map_start_pose(data)
     current_x, current_y, current_heading = accepted_runs(data)[-1]['path'][-1]
     x, y = float(current_x), float(current_y)
@@ -1019,6 +998,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
         path.append((x, y, heading))
 
     print("\n=== Going home ===")
+    print(f"  Strategy: {strategy.name}")
     print(
         f"  Planned {sum(math.dist(a, b) for a, b in zip(route, route[1:])):.0f}mm "
         f"along {len(route)} proven-route waypoints."
@@ -1166,6 +1146,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     return {
         'timestamp': datetime.now().isoformat(timespec='seconds'),
         'mode': 'go_home',
+        'strategy': strategy.name,
         'status': 'accepted' if completed else 'partial',
         'quality': {
             'accepted_updates': sum(event['accepted'] for event in events),
@@ -1184,7 +1165,13 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     }
 
 
-def go_home_with_retries(data, deg_per_yaw, mm_per_wd, max_retries=GO_HOME_MAX_RETRIES):
+def go_home_with_retries(
+    data,
+    deg_per_yaw,
+    mm_per_wd,
+    max_retries=GO_HOME_MAX_RETRIES,
+    strategy=ACTIVE_GO_HOME_STRATEGY,
+):
     """Drive home, replanning around blockages until arrival or retries run out.
 
     Each aborted attempt that records a blocked edge and keeps a trustworthy pose
@@ -1196,7 +1183,7 @@ def go_home_with_retries(data, deg_per_yaw, mm_per_wd, max_retries=GO_HOME_MAX_R
     data = {**data, 'runs': list(data.get('runs', []))}
     for attempt in range(max_retries + 1):
         try:
-            run = go_home(data, deg_per_yaw, mm_per_wd)
+            run = go_home(data, deg_per_yaw, mm_per_wd, strategy)
         except ValueError as exc:
             print(f"Go-home cannot proceed: {exc}")
             break
@@ -1649,7 +1636,12 @@ def main(args=None):
     img_path = map_file.with_suffix('.png')
 
     if options.go_home:
-        produced_runs = go_home_with_retries(strategy_map, deg_per_yaw, mm_per_wd)
+        produced_runs = go_home_with_retries(
+            strategy_map,
+            deg_per_yaw,
+            mm_per_wd,
+            strategy=GO_HOME_STRATEGIES[options.go_home_strategy],
+        )
         if not produced_runs:
             return
     else:

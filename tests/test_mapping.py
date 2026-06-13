@@ -46,6 +46,71 @@ class MappingStrategyTests(unittest.TestCase):
             ).no_conservative_exploration
         )
 
+    def test_mapping_config_sets_mode_and_run_options(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "mode": "go_home",
+                        "map_file": "data/room_map.json",
+                        "calibration": "data/calibration.json",
+                        "duration_seconds": 300,
+                        "conservative_exploration": False,
+                        "territory_size_mm": 1500,
+                        "go_home_strategy": "hard-blocked-edge",
+                    }
+                )
+            )
+
+            options = map_room.parse_args(["--config", str(config)])
+
+        self.assertEqual(options.go_home, "data/room_map.json")
+        self.assertEqual(options.calibration, "data/calibration.json")
+        self.assertEqual(options.duration, 300)
+        self.assertTrue(options.no_conservative_exploration)
+        self.assertEqual(options.territory_size, 1500)
+        self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
+
+    def test_explicit_cli_options_override_mapping_config(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "mode": "go_home",
+                        "map_file": "old.json",
+                        "duration_seconds": 300,
+                        "go_home_strategy": "hard-blocked-edge",
+                    }
+                )
+            )
+
+            options = map_room.parse_args(
+                [
+                    "--config",
+                    str(config),
+                    "--resume",
+                    "new.json",
+                    "--duration",
+                    "45",
+                    "--go-home-strategy",
+                    "d-star-lite",
+                ]
+            )
+
+        self.assertIsNone(options.go_home)
+        self.assertEqual(options.resume, "new.json")
+        self.assertEqual(options.duration, 45)
+        self.assertEqual(options.go_home_strategy, "d-star-lite")
+
+    def test_mapping_config_rejects_unknown_settings(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.json"
+            config.write_text('{"mystery": true}')
+            with self.assertRaises(SystemExit):
+                map_room.parse_args(["--config", str(config)])
+
     def test_latest_calibration_file_uses_timestamped_name(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -77,6 +142,16 @@ class MappingStrategyTests(unittest.TestCase):
                 ["--start-with-map", "room_map.json", "--calibration", "calibration.json"]
             ).calibration,
             "calibration.json",
+        )
+        self.assertEqual(
+            map_room.parse_args(["--go-home"]).go_home_strategy,
+            "d-star-lite",
+        )
+        self.assertEqual(
+            map_room.parse_args(
+                ["--go-home", "room_map.json", "--go-home-strategy", "hard-blocked-edge"]
+            ).go_home_strategy,
+            "hard-blocked-edge",
         )
 
     def test_load_resume_state_uses_last_pose_and_map_calibration(self):
@@ -253,7 +328,35 @@ class MappingStrategyTests(unittest.TestCase):
             ]
         }
         with self.assertRaisesRegex(ValueError, "no unblocked proven route"):
-            map_room.plan_home_route(data)
+            map_room.plan_home_route(data, map_room.LEGACY_GO_HOME_STRATEGY)
+
+    def test_d_star_lite_softens_blocked_route_instead_of_deleting_it(self):
+        data = {
+            "runs": [
+                {"status": "accepted", "path": [[0, 0, 0], [1000, 0, 0]]},
+                {
+                    "mode": "go_home",
+                    "status": "partial",
+                    "quality": {
+                        "tracking_lost": False,
+                        "rejected_updates": 0,
+                        "issues": ["go-home leg stopped early"],
+                    },
+                    "path": [[1000, 0, 0]],
+                    "blocked_edges": [
+                        {"from": [1000, 0], "to": [0, 0], "stop": [600, 0]}
+                    ],
+                },
+            ]
+        }
+
+        self.assertEqual(
+            map_room.plan_home_route(data),
+            [(1000.0, 0.0), (0.0, 0.0)],
+        )
+
+    def test_active_go_home_strategy_is_d_star_lite(self):
+        self.assertEqual(map_room.ACTIVE_GO_HOME_STRATEGY.name, "d-star-lite")
 
     def test_obstacle_near_home_counts_as_arrival(self):
         obstacle = {"halt": "obstacle", "side": "front", "prox_left": 30, "prox_right": 27}

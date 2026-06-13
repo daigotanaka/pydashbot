@@ -26,6 +26,38 @@ uv run pydashbot-server
 Only one process can maintain the Bluetooth connection to Dash. The calibration
 and mapping scripts use the running server instead of connecting directly.
 
+## Configuration
+
+Normal mapping runs can be described in one JSON file instead of a long command
+line. The provided [`config/config.json`](config/config.json) is set up for the current
+`data/room_map.json` and D* Lite go-home strategy. Edit it, then run:
+
+```bash
+uv run --extra tools examples/mapping/map_room.py \
+  --config examples/mapping/config/config.json
+```
+
+The config supports:
+
+```json
+{
+  "mode": "explore",
+  "map_file": null,
+  "calibration": null,
+  "output": null,
+  "duration_seconds": 60,
+  "conservative_exploration": true,
+  "territory_size_mm": 1000,
+  "go_home_strategy": "d-star-lite"
+}
+```
+
+`mode` is one of `explore`, `go_home`, `start_with_map`, or `resume`.
+`map_file` selects the map for every mode except fresh `explore`; use `null` to
+select the newest map. Paths are interpreted relative to the working directory.
+Individual CLI flags remain available as temporary overrides and take precedence
+over config values.
+
 ## Calibration
 
 Place Dash in open space with at least 300 mm of clear floor ahead and enough
@@ -113,24 +145,32 @@ uv run --extra tools examples/mapping/map_room.py \
   --go-home data/room_map.json
 ```
 
-Go-home chooses the shortest route along previously traversed path segments. It
-does not invent shortcuts through unknown space. Movement remains
-obstacle-aware, each leg is limited to 1 meter, and the return aborts if a leg
-stops early or odometry becomes implausible.
+Go-home plans along previously traversed path segments. It does not invent
+shortcuts through unknown space. Movement remains obstacle-aware, each leg is
+limited to 1 meter, and the return aborts if a leg stops early or odometry
+becomes implausible.
 
-When a leg stops early on an obstacle, go-home records that route segment as a
-temporarily blocked edge in the map (its endpoints, the observed stop position,
-and a timestamp). Subsequent go-home attempts exclude blocked edges when
-planning, so the robot reroutes around a known obstruction instead of retrying
-the same corridor. When every proven route home is blocked, the command reports
-this clearly and refuses to move rather than retreating and retrying.
+The default planner is **D* Lite**, based on Koenig and Likhachev's
+[D* Lite algorithm](https://idm-lab.org/bib/abstracts/papers/aaai02b.pdf) for a
+robot moving toward a fixed goal while observed route costs change. When a leg
+stops early, the mapper records the failed approach and raises the cost of graph
+edges that approach the actual stop position from the same direction. The edge
+remains available as a last resort, avoiding false "no route home" failures
+caused by deleting broad overlapping corridors.
+
+The previous hard-exclusion strategy remains available for A/B testing:
+
+```bash
+uv run --extra tools examples/mapping/map_room.py \
+  --go-home data/room_map.json \
+  --go-home-strategy hard-blocked-edge
+```
 
 A single `--go-home` invocation replans automatically: if an attempt aborts on a
-blockage while keeping a trustworthy pose, it records the blocked edge and tries
-an alternative proven route from where Dash stopped, up to a few times, until it
-reaches home or no unblocked route remains. Retries stop early if the pose is no
-longer trustworthy or the halt was not a blockage (for example a turn that did
-not execute), since replanning would not help those cases.
+blockage while keeping a trustworthy pose, it records the failed approach and
+tries a lower-cost proven route from where Dash stopped, up to a few times.
+Retries stop early if the pose is no longer trustworthy or the halt was not a
+blockage (for example a turn that did not execute).
 
 Because Dash is retracing space it already traversed, go-home relaxes its
 obstacle criteria while following a proven corridor: it uses a higher proximity
@@ -185,22 +225,22 @@ current directory.
 ## Recommended Explore-And-Return Session
 
 1. Start the WebSocket server.
-2. Place Dash at the starting corner.
-3. Run a fresh exploration:
+2. Set `mode` to `explore`, choose `calibration` / `output`, and set the desired
+   `duration_seconds` in `examples/mapping/config/config.json`.
+3. Place Dash at the starting corner and run:
 
 ```bash
 uv run --extra tools examples/mapping/map_room.py \
-  --calibration data/calibration.json \
-  --output data/room_map.json \
-  --duration 300
+  --config examples/mapping/config/config.json
 ```
 
 4. Confirm Dash has not been manually moved.
-5. Return home:
+5. Change `mode` to `go_home`, set `map_file` to the saved map, and run the same
+   command:
 
 ```bash
 uv run --extra tools examples/mapping/map_room.py \
-  --go-home data/room_map.json
+  --config examples/mapping/config/config.json
 ```
 
 ## Map Data And Quality
@@ -244,11 +284,10 @@ How it works:
    blocked edge, including its endpoints, timestamp, and observed stop position.
 2. Blocked-edge data is preserved per run in the map JSON, so it survives across
    safely aborted go-home runs.
-3. Planning excludes graph edges that run along a blocked corridor. A
-   perpendicular crossing into a different corridor stays usable, so the robot
-   reroutes through proven space when an alternative exists.
-4. When no unblocked proven route home remains, go-home reports this and refuses
-   to move.
+3. D* Lite raises the cost of nearby graph edges traveling in the failed
+   direction. Reverse travel away from the obstruction remains cheap.
+4. Failed approaches remain available at high cost as a last resort, so broad
+   blockage records cannot disconnect an otherwise connected proven graph.
 
 Safety constraints honored by the implementation:
 
@@ -301,41 +340,15 @@ Relevant code: `go_home` (the move loop, `needs_wall_clearance`,
 `PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
 list in the room-map JSON.
 
-### Next Challenge: Blocked Edges Over-Block Parallel Proven Corridors
+### Legacy Strategy: Blocked Edges Over-Block Parallel Proven Corridors
 
-A blocked edge can still remove a *different*, already-driven corridor from the
-plan, producing a false "no unblocked route home" even when a proven path
-exists. `edge_is_blocked` excludes any graph edge whose midpoint falls within
-`BLOCKED_EDGE_TOLERANCE_MM` of the blocked segment and runs roughly parallel to
-it. The endpoint-sharing case is already guarded: a candidate edge is excluded
-only when its midpoint projects onto the *interior* of the blocked segment, so a
-corridor that merely shares an endpoint with it, or runs past its far end,
-survives. What remains is collinear bleed — a genuinely parallel corridor that
-overlaps the blocked segment's interior is still excluded even though Dash
-already drove it.
+The optional `hard-blocked-edge` strategy preserves the original planner for
+comparison. It can remove a different, already-driven parallel corridor and
+produce a false "no unblocked route home." The default D* Lite strategy fixes
+this by applying localized directional costs instead of hard exclusions.
 
-Remaining directions:
-
-1. **Tighten the blocked region further.** Block a small zone around the actual
-   stop position rather than the whole route leg, reducing collinear bleed onto
-   genuinely parallel neighboring corridors that still overlap interior-wise.
-2. **Soft costs instead of hard exclusion.** Distinguish edges Dash actually
-   drove (exploration path segments) from inferred proximity links, and
-   downweight a proven-driven corridor that overlaps a blockage so it becomes a
-   last resort instead of removing it — "we already drove this" is the strongest
-   evidence of passability. This also guarantees a route whenever the proven
-   graph is connected.
-
-Safety constraints:
-
-- Still avoid re-driving the same blocked approach that failed.
-- Prefer trying a proven corridor at reduced confidence over falsely reporting no
-  route, but keep obstacle-aware movement enabled so a genuine obstruction still
-  stops Dash.
-
-Relevant code: `edge_is_blocked`, `_point_near_segment`, `collect_blocked_edges`,
-and `plan_home_route` in `examples/mapping/map_room.py`; the per-run
-`blocked_edges` records in the room-map JSON.
+Relevant code: `HardBlockedEdgeStrategy` and `DStarLiteStrategy` in
+`examples/mapping/go_home_strategies.py`.
 
 ### Conservative Exploration
 
@@ -401,51 +414,43 @@ unlocking, and run metadata.
 
 ### Next Challenge: A Better Retry Planner
 
-The current retry loop excludes the exact blocked edge, replans the shortest
-proven route, and repeats. In testing this over-blocked parallel corridors,
-gave up too early, and produced routes full of stall-prone small turns. A manual
-drive home from the same stuck pose succeeded by doing almost the opposite:
-backing into open space, committing to one long straight run, and re-referencing
-to a wall. The outline below captures that experience as a target algorithm.
+The D* Lite strategy now applies localized soft costs and keeps blocked proven
+corridors available as a last resort. The remaining retry problem is physical:
+replanning while Dash is pressed against a wall can still select a route that it
+cannot begin. A manual drive home from the same stuck pose succeeded by backing
+into open space, committing to one long straight run, and re-referencing to a
+wall.
 
 1. **Retreat to maneuver room before replanning.** When a leg stops blocked,
    reverse a bounded distance into space just traversed (known clear) before
    planning the next attempt. Manual control needed roughly 300 mm of clearance
    before Dash could turn at all; planning a turn while wedged against the wall
    only stalls.
-2. **Soft costs, not hard exclusions.** Do not delete the blocked corridor from
-   the graph. Keep edges Dash actually drove during exploration as a trusted
-   graph, and raise the cost of the specific blocked approach (a small zone
-   around the stop position) so the planner prefers alternatives but can still
-   fall back to a proven corridor as a last resort. Never let a blocked segment
-   exclude a parallel or endpoint-sharing proven corridor (see the over-blocking
-   challenge above).
-3. **Prefer few long straight legs over many short ones.** The manual success
+2. **Prefer few long straight legs over many short ones.** The manual success
    came from one long straight drive (a 600 mm leg that completed in full) down a
    clear line, not from nibbling forward. Favor routes with long, wall-parallel
    straight segments and the fewest turns, since each turn from rest is a failure
    risk.
-4. **Make turns reliable.** Small turns (~15-35 degrees) stalled from rest in
+3. **Make turns reliable.** Small turns (~15-35 degrees) stalled from rest in
    testing, while large turns executed. Snap heading changes to a minimum
    effective turn, or add a brief kick or wiggle to break static friction, and
    verify rotation with the closed-loop turn outcome, compensating for the
    under-rotation that was also observed (a 40-degree command yielding ~11
    degrees).
-5. **Re-reference to walls to bound drift.** Pure dead reckoning over ~10 moves
+4. **Re-reference to walls to bound drift.** Pure dead reckoning over ~10 moves
    drifted to a 165-675 mm position uncertainty. Periodically, and at the end,
    re-reference against a known wall (the rear-wall docking move, or a side wall)
    to reset accumulated error instead of trusting odometry.
-6. **Generous near-home acceptance, then fine-tune.** Manual driving reached
+5. **Generous near-home acceptance, then fine-tune.** Manual driving reached
    about 200 mm from the dock with only a final orientation tweak needed. Once
    within a near-home band, hand off to the existing crawl plus rear-reference
    final approach and a closing orientation correction.
-7. **Bound and report.** Cap the retries, report the halt reason and the chosen
-   alternative each time, and when only an over-blocked proven corridor remains,
-   try it at reduced confidence rather than declaring no route.
+6. **Bound and report.** Continue reporting each halt and chosen alternative,
+   while keeping the retry count bounded.
 
 Relevant code: `go_home_with_retries`, `go_home`, `plan_home_route`,
-`edge_is_blocked`, and the final-approach helpers (`crawl_home`,
-`rear_reference`) in `examples/mapping/map_room.py`.
+`DStarLiteStrategy`, and the final-approach helpers (`crawl_home`,
+`rear_reference`).
 
 ### Detecting Wheel Slip
 
@@ -516,7 +521,14 @@ Relevant code: `validate_odometry` (and the `TRACK_WIDTH_MM` /
 
 ## Command Reference
 
-Show all mapper options:
+Run from the mapping config:
+
+```bash
+uv run --extra tools examples/mapping/map_room.py \
+  --config examples/mapping/config/config.json
+```
+
+Show all mapper overrides:
 
 ```bash
 uv run --extra tools examples/mapping/map_room.py --help
