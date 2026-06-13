@@ -10,6 +10,7 @@ Starting ritual (run every session for a consistent origin):
 """
 
 import argparse
+import heapq
 import json
 import math
 import random
@@ -47,6 +48,14 @@ BLOCKER_CORRIDOR_MM = 275
 ODOMETRY_SIGN_TOLERANCE_MM = 40
 ODOMETRY_MAX_MOVE_HEADING_DEG = 45
 ODOMETRY_MAX_TURN_DISTANCE_MM = 150
+LOOP_CLOSURE_MATCH_RADIUS_MM = 350
+LOOP_CLOSURE_PATH_RADIUS_MM = 700
+LOOP_CLOSURE_MAX_CORRECTION_MM = 250
+LOOP_CLOSURE_GAIN = 0.6
+HOME_ROUTE_LINK_RADIUS_MM = 250
+HOME_ROUTE_COLLINEAR_DEG = 12
+HOME_MAX_LEG_MM = 1000
+HOME_POSITION_TOLERANCE_MM = 100
 
 WALL_SOUNDS   = ['ohno', 'ayayay', 'huh', 'confused2', 'confused3']
 TILT_SOUNDS   = ['ayayay', 'ohno', 'confused5', 'confused8']
@@ -57,13 +66,13 @@ def parse_args(args=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
-        '--resume',
+        '--go-home',
         nargs='?',
         const='latest',
         metavar='MAP_FILE',
         help=(
-            "skip corner docking and append to MAP_FILE from its final saved pose; "
-            "without MAP_FILE, use the newest room map"
+            "return from MAP_FILE's final saved pose to its initial pose and "
+            "orientation; without MAP_FILE, use the newest room map"
         ),
     )
     mode.add_argument(
@@ -89,7 +98,21 @@ def parse_args(args=None):
             "otherwise use the selected map or a timestamped filename"
         ),
     )
+    parser.add_argument(
+        '--duration',
+        type=positive_seconds,
+        default=DURATION,
+        metavar='SECONDS',
+        help=f"exploration run time in seconds (default: {DURATION})",
+    )
     return parser.parse_args(args)
+
+
+def positive_seconds(value):
+    seconds = float(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("duration must be greater than zero")
+    return seconds
 
 
 def wrap_delta(prev, curr, bits):
@@ -101,6 +124,14 @@ def wrap_delta(prev, curr, bits):
     elif d < -half:
         d += full
     return d
+
+
+def wheel_translation_delta(left_prev, left_now, right_prev, right_now):
+    """Return translation ticks while canceling opposite wheel motion in turns."""
+    return (
+        wrap_delta(left_prev, left_now, 16)
+        + wrap_delta(right_prev, right_now, 16)
+    ) / 2
 
 
 def angle_delta(target, current):
@@ -169,6 +200,33 @@ def map_knowledge(data):
         blocker_source = data.get('walls', []) + data.get('obstacles', [])
     blockers = [(float(point[0]), float(point[1])) for point in blocker_source]
     return path_points, blockers
+
+
+def revisit_pose_correction(
+    x,
+    y,
+    observed_point,
+    path_points,
+    landmarks,
+):
+    """Return a bounded XY correction when an observation closes a known loop."""
+    if not path_points or not landmarks:
+        return None
+    if min(math.hypot(x - px, y - py) for px, py in path_points) > LOOP_CLOSURE_PATH_RADIUS_MM:
+        return None
+
+    ox, oy = observed_point
+    target = min(landmarks, key=lambda point: math.hypot(ox - point[0], oy - point[1]))
+    dx, dy = target[0] - ox, target[1] - oy
+    distance = math.hypot(dx, dy)
+    if distance == 0 or distance > LOOP_CLOSURE_MATCH_RADIUS_MM:
+        return None
+
+    correction_scale = min(
+        LOOP_CLOSURE_GAIN,
+        LOOP_CLOSURE_MAX_CORRECTION_MM / distance,
+    )
+    return dx * correction_scale, dy * correction_scale, target, distance
 
 
 def heading_score(
@@ -293,13 +351,15 @@ def load_map_data(map_file):
     """Load a map and validate the calibration needed to extend it."""
     data = json.loads(map_file.read_text())
     calibration = data.get('calibration', {})
-    if 'deg_per_yaw' not in calibration or 'mm_per_wd' not in calibration:
+    if 'deg_per_yaw' not in calibration or not (
+        'mm_per_wheel_tick' in calibration or 'mm_per_wd' in calibration
+    ):
         raise ValueError(f"{map_file} does not contain calibration scales")
     return data
 
 
 def load_resume_state(map_file):
-    """Return calibration and final pose from a map that can be resumed."""
+    """Return calibration and the map's final saved pose."""
     data = load_map_data(map_file)
     calibration = data['calibration']
     runs = accepted_runs(data)
@@ -307,12 +367,12 @@ def load_resume_state(map_file):
         raise ValueError(f"{map_file} does not contain a final robot pose")
     x, y, heading = runs[-1]['path'][-1]
     print(
-        f"=== Resuming {map_file} from "
+        f"=== Using final pose from {map_file}: "
         f"({x:.0f}, {y:.0f}) mm, heading {heading:.1f}° ==="
     )
     return (
         calibration['deg_per_yaw'],
-        calibration['mm_per_wd'],
+        calibration.get('mm_per_wheel_tick', calibration.get('mm_per_wd')),
         float(x),
         float(y),
         float(heading),
@@ -328,6 +388,98 @@ def map_start_pose(data):
     return float(x), float(y), float(heading)
 
 
+def simplify_home_route(route):
+    """Remove duplicate and nearly straight waypoints without creating shortcuts."""
+    deduped = []
+    for point in route:
+        point = (float(point[0]), float(point[1]))
+        if not deduped or math.dist(point, deduped[-1]) > 1:
+            deduped.append(point)
+
+    simplified = []
+    for point in deduped:
+        simplified.append(point)
+        while len(simplified) >= 3:
+            a, b, c = simplified[-3:]
+            ab = math.atan2(b[1] - a[1], b[0] - a[0])
+            bc = math.atan2(c[1] - b[1], c[0] - b[0])
+            turn = (bc - ab + math.pi) % (2 * math.pi) - math.pi
+            turn_degrees = abs(math.degrees(turn))
+            if (
+                turn_degrees > HOME_ROUTE_COLLINEAR_DEG
+                and turn_degrees < 180 - HOME_ROUTE_COLLINEAR_DEG
+            ):
+                break
+            simplified.pop(-2)
+    return simplified
+
+
+def plan_home_route(data):
+    """Return the shortest route home along previously traversed path segments."""
+    latest_run = data.get('runs', [])[-1] if data.get('runs') else None
+    if not latest_run or latest_run.get('status', 'accepted') != 'accepted':
+        raise ValueError("go-home requires the map's latest run to be accepted")
+    if latest_run.get('quality', {}).get('tracking_lost'):
+        raise ValueError("go-home requires a trustworthy final saved pose")
+
+    runs = [run for run in accepted_runs(data) if run.get('path')]
+    if not runs:
+        raise ValueError("map does not contain an accepted path home")
+
+    nodes = []
+    adjacency = {}
+    point_lookup = {}
+    for run_index, run in enumerate(runs):
+        run_nodes = []
+        for point_index, point in enumerate(run['path']):
+            node = (run_index, point_index)
+            position = (float(point[0]), float(point[1]))
+            nodes.append((node, position))
+            point_lookup[node] = position
+            adjacency[node] = []
+            run_nodes.append(node)
+        for first, second in zip(run_nodes, run_nodes[1:]):
+            distance = math.dist(point_lookup[first], point_lookup[second])
+            adjacency[first].append((second, distance))
+            adjacency[second].append((first, distance))
+
+    for index, (first, first_point) in enumerate(nodes):
+        for second, second_point in nodes[index + 1:]:
+            if first[0] == second[0] and abs(first[1] - second[1]) <= 1:
+                continue
+            distance = math.dist(first_point, second_point)
+            if distance <= HOME_ROUTE_LINK_RADIUS_MM:
+                adjacency[first].append((second, distance))
+                adjacency[second].append((first, distance))
+
+    start = (len(runs) - 1, len(runs[-1]['path']) - 1)
+    goal = (0, 0)
+    distances = {start: 0.0}
+    previous = {}
+    queue = [(0.0, start)]
+    while queue:
+        distance, node = heapq.heappop(queue)
+        if node == goal:
+            break
+        if distance != distances.get(node):
+            continue
+        for neighbor, edge_distance in adjacency[node]:
+            candidate = distance + edge_distance
+            if candidate < distances.get(neighbor, math.inf):
+                distances[neighbor] = candidate
+                previous[neighbor] = node
+                heapq.heappush(queue, (candidate, neighbor))
+
+    if goal not in distances:
+        raise ValueError("accepted map paths do not connect back to the starting pose")
+
+    route_nodes = [goal]
+    while route_nodes[-1] != start:
+        route_nodes.append(previous[route_nodes[-1]])
+    route_nodes.reverse()
+    return simplify_home_route([point_lookup[node] for node in route_nodes])
+
+
 # ---------------------------------------------------------------------------
 # Calibration
 # ---------------------------------------------------------------------------
@@ -335,7 +487,8 @@ def load_calibration(cal_file=None):
     cal_file = cal_file or latest_calibration_file()
     cal = json.loads(cal_file.read_text())
     deg_per_yaw = cal['deg_per_yaw'] * cal.get('yaw_sign', 1)
-    mm_per_wd   = cal['mm_per_wd']   * cal.get('wd_sign',  1)
+    mm_per_wd = cal.get('mm_per_wheel_tick', cal.get('mm_per_wd'))
+    mm_per_wd *= cal.get('wd_sign', 1)
     print(f"=== Calibration loaded from {cal_file} (recorded {cal.get('timestamp', 'unknown')}) ===")
     print(f"  deg_per_yaw={deg_per_yaw:.4f}  mm_per_wd={mm_per_wd:.4f}")
     return deg_per_yaw, mm_per_wd
@@ -413,12 +566,156 @@ def dock_to_corner(deg_per_yaw, mm_per_wd):
     return x0, y0
 
 
+def go_home(data, deg_per_yaw, mm_per_wd):
+    """Follow the shortest known-safe route back to the map's initial pose."""
+    route = plan_home_route(data)
+    start_x, start_y, start_heading = map_start_pose(data)
+    current_x, current_y, current_heading = accepted_runs(data)[-1]['path'][-1]
+    x, y = float(current_x), float(current_y)
+    heading = normalize_heading(float(current_heading))
+    yaw_prev = send_command('get_yaw')['result']
+    left_prev = send_command('get_left_wheel')['result']
+    right_prev = send_command('get_right_wheel')['result']
+    path = [(x, y, heading)]
+    events = []
+    issues = []
+
+    def update_pose(action, requested):
+        nonlocal x, y, heading, yaw_prev, left_prev, right_prev
+        yaw_now = read_settled('get_yaw')
+        left_now = read_settled('get_left_wheel')
+        right_now = read_settled('get_right_wheel')
+        d_yaw = wrap_delta(yaw_prev, yaw_now, 16)
+        left_delta = wrap_delta(left_prev, left_now, 16)
+        right_delta = wrap_delta(right_prev, right_now, 16)
+        distance_mm = ((left_delta + right_delta) / 2) * mm_per_wd
+        heading_delta = d_yaw * deg_per_yaw
+        event_issues = validate_odometry(
+            action,
+            requested,
+            distance_mm,
+            heading_delta,
+        )
+        yaw_prev, left_prev, right_prev = yaw_now, left_now, right_now
+        event = {
+            'action': action,
+            'requested': requested,
+            'raw_yaw_delta': d_yaw,
+            'raw_left_wheel_delta': left_delta,
+            'raw_right_wheel_delta': right_delta,
+            'heading_delta': heading_delta,
+            'distance_mm': distance_mm,
+            'accepted': not event_issues,
+        }
+        if event_issues:
+            event['issues'] = event_issues
+            issues.extend(event_issues)
+        else:
+            heading = normalize_heading(heading + heading_delta)
+            hr = math.radians(heading)
+            x += distance_mm * math.cos(hr)
+            y += distance_mm * math.sin(hr)
+            path.append((x, y, heading))
+        events.append(event)
+        return None if event_issues else distance_mm
+
+    def turn_to(target_heading):
+        turn = angle_delta(target_heading, heading)
+        if abs(turn) < 2:
+            return True
+        send_command('turn', turn)
+        return update_pose('turn', turn) is not None
+
+    print("\n=== Going home ===")
+    print(
+        f"  Planned {sum(math.dist(a, b) for a, b in zip(route, route[1:])):.0f}mm "
+        f"along {len(route)} proven-route waypoints."
+    )
+    send_command('say', 'okay')
+    send_command('neck_color', '#00ffff')
+    completed = True
+
+    try:
+        for waypoint_x, waypoint_y in route[1:]:
+            while math.hypot(waypoint_x - x, waypoint_y - y) > HOME_POSITION_TOLERANCE_MM:
+                target_heading = math.degrees(math.atan2(waypoint_y - y, waypoint_x - x))
+                if not turn_to(target_heading):
+                    completed = False
+                    break
+                requested = min(
+                    HOME_MAX_LEG_MM,
+                    math.hypot(waypoint_x - x, waypoint_y - y),
+                )
+                send_command(
+                    'move',
+                    requested,
+                    FORWARD_SPEED_MMPS,
+                    wall_stop_sound=None,
+                )
+                traveled = update_pose('forward', requested)
+                if traveled is None or traveled < requested * 0.8:
+                    issues.append('go-home leg stopped early')
+                    completed = False
+                    break
+                print(
+                    f"  home distance={math.hypot(start_x - x, start_y - y):.0f}mm  "
+                    f"pose=({x:.0f},{y:.0f}) heading={heading:.1f}°",
+                    end='\r',
+                )
+            if not completed:
+                break
+
+        if completed:
+            completed = turn_to(start_heading)
+        if completed and math.hypot(start_x - x, start_y - y) > HOME_POSITION_TOLERANCE_MM:
+            issues.append('final pose remained outside home tolerance')
+            completed = False
+    except KeyboardInterrupt:
+        issues.append('go-home interrupted')
+        completed = False
+        print('\nInterrupted.')
+    finally:
+        send_command('stop')
+        send_command('say', 'bye' if completed else 'ohno')
+        send_command('neck_color', '#ffffff')
+
+    print(
+        f"\nGo-home {'complete' if completed else 'aborted'} at "
+        f"({x:.0f}, {y:.0f}) mm, heading {heading:.1f}°"
+    )
+    return {
+        'timestamp': datetime.now().isoformat(timespec='seconds'),
+        'mode': 'go_home',
+        'status': 'accepted' if completed else 'partial',
+        'quality': {
+            'accepted_updates': sum(event['accepted'] for event in events),
+            'rejected_updates': sum(not event['accepted'] for event in events),
+            'tracking_lost': not completed,
+            'issues': issues,
+        },
+        'planned_route': route,
+        'path': path,
+        'walls': [],
+        'obstacles': [],
+        'events': events,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Exploration
 # ---------------------------------------------------------------------------
-def explore(deg_per_yaw, mm_per_wd, x0, y0, heading0=0.0, strategy_map=None):
+def explore(
+    deg_per_yaw,
+    mm_per_wd,
+    x0,
+    y0,
+    heading0=0.0,
+    strategy_map=None,
+    duration=DURATION,
+):
     yaw_prev = send_command('get_yaw')['result']
-    wd_prev  = send_command('get_wheel_distance')['result']
+    left_prev = send_command('get_left_wheel')['result']
+    right_prev = send_command('get_right_wheel')['result']
     pitch_samples = [send_command('get_pitch')['result'] for _ in range(5)]
     baseline_pitch = sum(pitch_samples) / len(pitch_samples)
 
@@ -432,28 +729,46 @@ def explore(deg_per_yaw, mm_per_wd, x0, y0, heading0=0.0, strategy_map=None):
     quality = {
         'accepted_updates': 0,
         'rejected_updates': 0,
+        'loop_closures': 0,
+        'loop_closure_correction_mm': 0.0,
         'tracking_lost': False,
         'issues': [],
     }
     known_path, known_blockers = map_knowledge(strategy_map or {})
+    known_walls = [
+        (float(point[0]), float(point[1]))
+        for run in accepted_runs(strategy_map or {})
+        for point in run.get('walls', [])
+    ]
+    known_obstacles = [
+        (float(point[0]), float(point[1]))
+        for run in accepted_runs(strategy_map or {})
+        for point in run.get('obstacles', [])
+    ]
     known_path.append((x, y))
 
     def update_pose(action, requested):
-        nonlocal heading, x, y, yaw_prev, wd_prev
+        nonlocal heading, x, y, yaw_prev, left_prev, right_prev
         yaw_now = read_settled('get_yaw')
-        wd_now = read_settled('get_wheel_distance')
+        left_now = read_settled('get_left_wheel')
+        right_now = read_settled('get_right_wheel')
         d_yaw = wrap_delta(yaw_prev, yaw_now, 16)
-        d_dist = wrap_delta(wd_prev, wd_now, 20)
+        left_delta = wrap_delta(left_prev, left_now, 16)
+        right_delta = wrap_delta(right_prev, right_now, 16)
+        d_dist = (left_delta + right_delta) / 2
         heading_delta = d_yaw * deg_per_yaw
         d_mm = d_dist * mm_per_wd
         yaw_prev = yaw_now
-        wd_prev = wd_now
+        left_prev = left_now
+        right_prev = right_now
         issues = validate_odometry(action, requested, d_mm, heading_delta)
         event = {
             'action': action,
             'requested': requested,
             'raw_yaw_delta': d_yaw,
-            'raw_wheel_delta': d_dist,
+            'raw_left_wheel_delta': left_delta,
+            'raw_right_wheel_delta': right_delta,
+            'translation_wheel_delta': d_dist,
             'heading_delta': heading_delta,
             'distance_mm': d_mm,
             'accepted': not issues and not quality['tracking_lost'],
@@ -508,12 +823,40 @@ def explore(deg_per_yaw, mm_per_wd, x0, y0, heading0=0.0, strategy_map=None):
         send_command('say', random.choice(RESUME_SOUNDS))
         send_command('neck_color', '#00ff00')
 
-    def mark_ahead(points, offset):
+    def mark_ahead(points, landmarks, offset):
+        nonlocal x, y
         if quality['tracking_lost']:
             return
         hr = math.radians(heading)
         point = (x + offset * math.cos(hr), y + offset * math.sin(hr))
+        correction = revisit_pose_correction(
+            x,
+            y,
+            point,
+            known_path[:-1],
+            landmarks,
+        )
+        if correction:
+            dx, dy, target, mismatch = correction
+            x += dx
+            y += dy
+            path[-1] = (x, y, heading)
+            known_path[-1] = (x, y)
+            point = (x + offset * math.cos(hr), y + offset * math.sin(hr))
+            correction_mm = math.hypot(dx, dy)
+            quality['loop_closures'] += 1
+            quality['loop_closure_correction_mm'] += correction_mm
+            events[-1]['loop_closure'] = {
+                'matched_landmark': target,
+                'observation_mismatch_mm': mismatch,
+                'pose_correction': (dx, dy),
+            }
+            print(
+                f'\n  [revisit] corrected pose by {correction_mm:.0f}mm '
+                f'toward known landmark'
+            )
         points.append(point)
+        landmarks.append(point)
         known_blockers.append(point)
 
     def report_leg(remaining, traveled, left, right, tilt):
@@ -531,13 +874,13 @@ def explore(deg_per_yaw, mm_per_wd, x0, y0, heading0=0.0, strategy_map=None):
         tilt = pitch - baseline_pitch
 
         if left >= PROX_THRESHOLD or right >= PROX_THRESHOLD:
-            mark_ahead(walls, WALL_OFFSET_MM)
+            mark_ahead(walls, known_walls, WALL_OFFSET_MM)
             return left, right, tilt, 'wall', WALL_SOUNDS, True
         if abs(tilt) > PITCH_TILT_THRESHOLD:
-            mark_ahead(obstacles, OBSTACLE_OFFSET_MM)
+            mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
             return left, right, tilt, f'tilt {tilt:+.0f}', TILT_SOUNDS, True
         if abs(traveled) < requested_distance * 0.8:
-            mark_ahead(obstacles, OBSTACLE_OFFSET_MM)
+            mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
             return left, right, tilt, 'early stop', WALL_SOUNDS, True
         return left, right, tilt, 'forward leg complete', None, False
 
@@ -546,7 +889,7 @@ def explore(deg_per_yaw, mm_per_wd, x0, y0, heading0=0.0, strategy_map=None):
         send_command('say', 'bye')
         send_command('neck_color', '#ffffff')
 
-    print(f"\n=== Exploring for {DURATION}s ===")
+    print(f"\n=== Exploring for {duration:g}s ===")
     print(
         f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
         "walls and tilt stop each leg early."
@@ -555,7 +898,7 @@ def explore(deg_per_yaw, mm_per_wd, x0, y0, heading0=0.0, strategy_map=None):
     send_command('neck_color', '#00ff00')
     turn_toward_knowledge('initial strategy')
 
-    end_time = time.time() + DURATION
+    end_time = time.time() + duration
 
     try:
         while time.time() < end_time and not quality['tracking_lost']:
@@ -594,6 +937,7 @@ def explore(deg_per_yaw, mm_per_wd, x0, y0, heading0=0.0, strategy_map=None):
     print(f'\nDone. Path={len(path)} pts  Walls={len(walls)}  Obstacles={len(obstacles)}')
     return {
         'timestamp': datetime.now().isoformat(timespec='seconds'),
+        'duration_seconds': duration,
         'status': 'partial' if quality['tracking_lost'] else 'accepted',
         'quality': quality,
         'path': path,
@@ -642,7 +986,10 @@ def save_map(
 
     data = {
         'schema_version': 2,
-        'calibration': {'deg_per_yaw': deg_per_yaw, 'mm_per_wd': mm_per_wd},
+        'calibration': {
+            'deg_per_yaw': deg_per_yaw,
+            'mm_per_wheel_tick': mm_per_wd,
+        },
         'runs':        all_runs,
         'walls':       all_walls,
         'obstacles':   all_obstacles,
@@ -750,11 +1097,11 @@ def main(args=None):
 
     strategy_map = {}
     source_map_file = None
-    if options.resume:
+    if options.go_home:
         source_map_file = (
             latest_map_file()
-            if options.resume == 'latest'
-            else Path(options.resume)
+            if options.go_home == 'latest'
+            else Path(options.go_home)
         )
         strategy_map = load_map_data(source_map_file)
         deg_per_yaw, mm_per_wd, x0, y0, heading0 = load_resume_state(source_map_file)
@@ -769,7 +1116,9 @@ def main(args=None):
         strategy_map = load_map_data(source_map_file)
         calibration = strategy_map['calibration']
         deg_per_yaw = calibration['deg_per_yaw']
-        mm_per_wd = calibration['mm_per_wd']
+        mm_per_wd = calibration.get(
+            'mm_per_wheel_tick', calibration.get('mm_per_wd')
+        )
         if calibration_override:
             deg_per_yaw, mm_per_wd = calibration_override
         print(f"=== Starting from dock with knowledge from {source_map_file} ===")
@@ -792,9 +1141,18 @@ def main(args=None):
         map_file = timestamped_path('room_map', '.json', run_started)
     img_path = map_file.with_suffix('.png')
 
-    run = explore(
-        deg_per_yaw, mm_per_wd, x0, y0, heading0, strategy_map
-    )
+    if options.go_home:
+        run = go_home(strategy_map, deg_per_yaw, mm_per_wd)
+    else:
+        run = explore(
+            deg_per_yaw,
+            mm_per_wd,
+            x0,
+            y0,
+            heading0,
+            strategy_map,
+            duration=options.duration,
+        )
     all_runs, all_walls, all_obstacles = save_map(
         deg_per_yaw,
         mm_per_wd,

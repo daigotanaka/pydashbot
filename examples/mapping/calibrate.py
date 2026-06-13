@@ -62,6 +62,13 @@ def wrap_delta(prev, curr, bits):
     return d
 
 
+def wheel_translation_delta(left_before, left_after, right_before, right_after):
+    """Return translation ticks while canceling opposite wheel motion in turns."""
+    left_delta = wrap_delta(left_before, left_after, 16)
+    right_delta = wrap_delta(right_before, right_after, 16)
+    return (left_delta + right_delta) / 2
+
+
 def main(args=None):
     options = parse_args(args)
     print("=== Calibration ===")
@@ -85,19 +92,27 @@ def main(args=None):
     print(f"  Yaw: {yaw0} -> {yaw90}  delta={yaw_delta}  scale={deg_per_yaw:.4f} deg/unit  sign={yaw_sign:+d}")
 
     print(f"Moving {CAL_DISTANCE_MM}mm forward to calibrate distance...")
-    wd_before = read_settled('get_wheel_distance')
+    left_before = read_settled('get_left_wheel')
+    right_before = read_settled('get_right_wheel')
     send_command('move', CAL_DISTANCE_MM, 100)
-    wd_after = read_settled('get_wheel_distance')
-    wd_delta = wrap_delta(wd_before, wd_after, 20)
-    if abs(wd_delta) < 3:
+    left_after = read_settled('get_left_wheel')
+    right_after = read_settled('get_right_wheel')
+    wheel_delta = wheel_translation_delta(
+        left_before, left_after, right_before, right_after
+    )
+    if abs(wheel_delta) < 3:
         print("  Warning: distance delta too small, using default scale")
-        mm_per_wd = 0.020
+        mm_per_wheel_tick = 0.200
         wd_sign = 1
     else:
-        mm_per_wd = float(CAL_DISTANCE_MM) / abs(wd_delta)
-        wd_sign = 1 if wd_delta > 0 else -1
+        mm_per_wheel_tick = float(CAL_DISTANCE_MM) / abs(wheel_delta)
+        wd_sign = 1 if wheel_delta > 0 else -1
 
-    print(f"  Wheel dist: {wd_before} -> {wd_after}  delta={wd_delta}  scale={mm_per_wd:.4f} mm/unit  sign={wd_sign:+d}")
+    print(
+        f"  Wheel ticks: L {left_before}->{left_after}, "
+        f"R {right_before}->{right_after}  average delta={wheel_delta:.1f}  "
+        f"scale={mm_per_wheel_tick:.4f} mm/tick  sign={wd_sign:+d}"
+    )
 
     print("Returning to start...")
     send_command('move', -CAL_DISTANCE_MM, 100)
@@ -108,7 +123,7 @@ def main(args=None):
     cal = {
         'deg_per_yaw': deg_per_yaw,
         'yaw_sign': yaw_sign,
-        'mm_per_wd': mm_per_wd,
+        'mm_per_wheel_tick': mm_per_wheel_tick,
         'wd_sign': wd_sign,
         'timestamp': datetime.now().isoformat(timespec='seconds'),
     }

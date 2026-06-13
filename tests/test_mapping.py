@@ -30,6 +30,13 @@ class MappingStrategyTests(unittest.TestCase):
             "data/my_map.json",
         )
 
+    def test_duration_argument_accepts_positive_seconds(self):
+        self.assertEqual(map_room.parse_args([]).duration, 60)
+        self.assertEqual(map_room.parse_args(["--duration", "90"]).duration, 90)
+        self.assertEqual(map_room.parse_args(["--duration", "2.5"]).duration, 2.5)
+        with self.assertRaises(SystemExit):
+            map_room.parse_args(["--duration", "0"])
+
     def test_latest_calibration_file_uses_timestamped_name(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -40,10 +47,10 @@ class MappingStrategyTests(unittest.TestCase):
                 path.write_text("{}")
             self.assertEqual(map_room.latest_calibration_file(root), newer)
 
-    def test_resume_argument_accepts_latest_or_explicit_map(self):
-        self.assertEqual(map_room.parse_args(["--resume"]).resume, "latest")
+    def test_go_home_argument_accepts_latest_or_explicit_map(self):
+        self.assertEqual(map_room.parse_args(["--go-home"]).go_home, "latest")
         self.assertEqual(
-            map_room.parse_args(["--resume", "room_map.json"]).resume,
+            map_room.parse_args(["--go-home", "room_map.json"]).go_home,
             "room_map.json",
         )
         self.assertEqual(
@@ -79,6 +86,107 @@ class MappingStrategyTests(unittest.TestCase):
         data = {"runs": [{"path": [[10, 20, 30], [40, 50, 60]]}]}
         self.assertEqual(map_room.map_start_pose(data), (10.0, 20.0, 30.0))
 
+    def test_home_route_uses_shortest_connected_traversed_path(self):
+        data = {
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [
+                        [0, 0, 0],
+                        [1000, 0, 0],
+                        [1000, 1000, 90],
+                        [100, 100, 180],
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(
+            map_room.plan_home_route(data),
+            [(100.0, 100.0), (0.0, 0.0)],
+        )
+
+    def test_home_route_follows_proven_segments_without_unknown_shortcut(self):
+        data = {
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [
+                        [0, 0, 0],
+                        [1000, 0, 0],
+                        [1000, 1000, 90],
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(
+            map_room.plan_home_route(data),
+            [(1000.0, 1000.0), (1000.0, 0.0), (0.0, 0.0)],
+        )
+
+    def test_home_route_removes_wall_contact_backtracking_spike(self):
+        self.assertEqual(
+            map_room.simplify_home_route(
+                [(800, 0), (1000, 0), (0, 0)]
+            ),
+            [(800.0, 0.0), (0.0, 0.0)],
+        )
+
+    def test_home_route_rejects_untrustworthy_final_pose(self):
+        data = {
+            "runs": [
+                {
+                    "status": "partial",
+                    "quality": {"tracking_lost": True},
+                    "path": [[0, 0, 0], [1000, 0, 0]],
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "latest run to be accepted"):
+            map_room.plan_home_route(data)
+
+    def test_go_home_returns_to_initial_pose_and_heading(self):
+        data = {
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [[0, 0, 0], [1000, 0, 90]],
+                }
+            ]
+        }
+        readings = {
+            "get_yaw": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
+        }
+        calls = []
+
+        def send_command(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(
+                map_room,
+                "read_settled",
+                side_effect=[
+                    90, -100, 100,
+                    90, 900, 1100,
+                    -90, 1100, 900,
+                ],
+            ),
+        ):
+            run = map_room.go_home(data, 1.0, 1.0)
+
+        self.assertEqual(run["status"], "accepted")
+        self.assertEqual(run["mode"], "go_home")
+        self.assertAlmostEqual(run["path"][-1][0], 0)
+        self.assertAlmostEqual(run["path"][-1][1], 0)
+        self.assertAlmostEqual(run["path"][-1][2], 0)
+        self.assertIn(("move", (1000, map_room.FORWARD_SPEED_MMPS), {"wall_stop_sound": None}), calls)
+
     def test_latest_map_file_includes_legacy_map(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -94,6 +202,22 @@ class MappingStrategyTests(unittest.TestCase):
     def test_odometry_validation_rejects_negative_forward_distance(self):
         issues = map_room.validate_odometry("forward", 3000, -1668, -2.6)
         self.assertIn("forward move measured negative distance", issues)
+
+    def test_wheel_distance_wrap_across_sign_boundary_stays_forward(self):
+        self.assertEqual(
+            map_room.wrap_delta(0x7FFF0, 0x80020, 20),
+            0x30,
+        )
+
+    def test_wheel_translation_averages_both_wheels(self):
+        self.assertEqual(
+            map_room.wheel_translation_delta(100, 600, 200, 700),
+            500,
+        )
+        self.assertEqual(
+            map_room.wheel_translation_delta(500, 200, 200, 500),
+            0,
+        )
 
     def test_odometry_validation_rejects_implausible_turn(self):
         issues = map_room.validate_odometry("turn", 90, 0, 372)
@@ -118,6 +242,40 @@ class MappingStrategyTests(unittest.TestCase):
             ],
         }
         self.assertEqual(map_room.map_knowledge(data), ([(1.0, 2.0)], [(3.0, 4.0)]))
+
+    def test_revisit_pose_correction_moves_toward_known_landmark(self):
+        correction = map_room.revisit_pose_correction(
+            100,
+            100,
+            (250, 100),
+            [(0, 0), (110, 90)],
+            [(150, 100)],
+        )
+        dx, dy, target, mismatch = correction
+        self.assertEqual(target, (150, 100))
+        self.assertEqual(mismatch, 100)
+        self.assertEqual(dx, -60)
+        self.assertEqual(dy, 0)
+
+    def test_revisit_pose_correction_ignores_unrecognized_area(self):
+        self.assertIsNone(
+            map_room.revisit_pose_correction(
+                5000,
+                5000,
+                (5150, 5000),
+                [(0, 0)],
+                [(150, 0)],
+            )
+        )
+        self.assertIsNone(
+            map_room.revisit_pose_correction(
+                100,
+                100,
+                (250, 100),
+                [(100, 100)],
+                [(1000, 1000)],
+            )
+        )
 
     def test_strategy_avoids_known_blockers(self):
         blockers = [(400, 0), (800, 0), (1200, 0)]
@@ -147,7 +305,8 @@ class MappingStrategyTests(unittest.TestCase):
         calls = []
         readings = {
             "get_yaw": iter([0]),
-            "get_wheel_distance": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
             "get_pitch": iter([0, 0, 0, 0, 0, 0]),
             "get_prox_left": iter([20]),
             "get_prox_right": iter([0]),
@@ -163,7 +322,6 @@ class MappingStrategyTests(unittest.TestCase):
         with (
             patch.object(map_room, "send_command", side_effect=send_command),
             patch.object(map_room.time, "time", side_effect=lambda: next(times)),
-            patch.object(map_room, "DURATION", 1),
             patch.object(
                 map_room,
                 "choose_exploration_angle",
@@ -173,10 +331,14 @@ class MappingStrategyTests(unittest.TestCase):
             patch.object(
                 map_room,
                 "read_settled",
-                side_effect=[0, 100, 0, 50, 100, 50],
+                side_effect=[
+                    0, 100, 100,
+                    0, 50, 50,
+                    100, 0, 100,
+                ],
             ),
         ):
-            run = map_room.explore(1.0, 1.0, 0.0, 0.0)
+            run = map_room.explore(1.0, 1.0, 0.0, 0.0, duration=1)
 
         methods = [method for method, _, _ in calls]
         move = next(call for call in calls if call[0] == "move")
@@ -192,7 +354,8 @@ class MappingStrategyTests(unittest.TestCase):
     def test_rejected_odometry_stops_run_without_mapping_bad_pose(self):
         readings = {
             "get_yaw": iter([0]),
-            "get_wheel_distance": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
             "get_pitch": iter([0, 0, 0, 0, 0, 0]),
             "get_prox_left": iter([0]),
             "get_prox_right": iter([0]),
@@ -207,11 +370,10 @@ class MappingStrategyTests(unittest.TestCase):
         with (
             patch.object(map_room, "send_command", side_effect=send_command),
             patch.object(map_room.time, "time", side_effect=lambda: next(times)),
-            patch.object(map_room, "DURATION", 1),
             patch.object(map_room, "choose_exploration_angle", return_value=0),
-            patch.object(map_room, "read_settled", side_effect=[0, -1000]),
+            patch.object(map_room, "read_settled", side_effect=[0, -1000, -1000]),
         ):
-            run = map_room.explore(1.0, 1.0, 0.0, 0.0)
+            run = map_room.explore(1.0, 1.0, 0.0, 0.0, duration=1)
 
         self.assertEqual(run["status"], "partial")
         self.assertEqual(run["path"], [(0.0, 0.0, 0.0)])

@@ -169,9 +169,8 @@ class RobotSensors(object):
         # value[11] the middle byte (8-15), value[10] the low byte (0-7).
         # Previously shifted the high nibble by 12, overlapping value[11]'s top
         # nibble and corrupting the reading (wild jumps + sign flips).
-        self.sensor_state["wheel_distance"] = _to_int(
-            (value[9] & 0xf) << 16 | value[11] << 8 | value[10],
-            20
+        self.sensor_state["wheel_distance"] = (
+            (value[9] & 0xf) << 16 | value[11] << 8 | value[10]
         )
 
         # Unknown sensor fields

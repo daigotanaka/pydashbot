@@ -61,12 +61,6 @@ uv sync
 `uv sync` creates `.venv`, installs the project, and uses the checked-in
 `uv.lock` file for reproducible dependencies.
 
-To install the optional Matplotlib dependency used by the room-mapping tool:
-
-```bash
-uv sync --extra tools
-```
-
 Turn on Dash before connecting. Only one process can maintain the Bluetooth
 connection at a time.
 
@@ -373,47 +367,9 @@ uv run examples/hardware_demo.py --name "Workshop Dash"
 uv run examples/sensor_monitor.py --address AA:BB:CC:DD:EE:FF
 ```
 
-Tools that use the running WebSocket server:
-
-```bash
-uv run examples/mapping/calibrate.py
-uv run --extra tools examples/mapping/map_room.py
-```
-
-These scripts communicate with physical hardware. Review their constants and
-arguments before running movement or calibration routines.
-
-Both tools create timestamped output filenames by default. Use `--output` to
-write to an exact path instead:
-
-```bash
-uv run examples/mapping/calibrate.py --output data/calibration.json
-uv run --extra tools examples/mapping/map_room.py \
-  --calibration data/calibration.json \
-  --output data/room_map.json
-```
-
-The mapper writes the image beside the JSON using the same basename and a
-`.png` extension.
-
-Continue from a map's final saved robot pose, or corner-dock at the normal
-starting point while reusing a map's prior knowledge:
-
-```bash
-uv run --extra tools examples/mapping/map_room.py --resume room_map.json
-uv run --extra tools examples/mapping/map_room.py --start-with-map room_map.json
-```
-
-Omit the map filename after either option to use the newest room map. Both
-map-backed modes append a new run to the selected map and choose headings that
-favor unexplored space while avoiding known walls and obstacles.
-
-Room-map files preserve every run, including raw odometry events. A run whose
-forward, reverse, or turn measurements are implausible is stopped immediately
-and marked `partial`. Its validated path prefix and observations still
-contribute to the map, while the rejected transition and everything after it
-remain isolated. Explicitly rejected runs are retained for diagnosis but
-excluded from future strategy and visualization.
+The [room-mapping examples](examples/mapping/README.md) cover calibration,
+autonomous exploration, map-guided exploration, and returning to the starting
+pose.
 
 ## Tests
 

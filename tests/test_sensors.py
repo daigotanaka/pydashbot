@@ -25,6 +25,16 @@ class SensorDecodeTests(unittest.TestCase):
         self.assertEqual(self.state["prox_rear"], 13)
         self.assertEqual(self.state["wheel_distance"], 0x33456)
 
+    def test_wheel_distance_remains_unsigned_above_sign_boundary(self):
+        value = bytearray(20)
+        value[9] = 0x0F
+        value[10] = 0x56
+        value[11] = 0x34
+
+        self.sensors._dash_sensor_decode(None, value)
+
+        self.assertEqual(self.state["wheel_distance"], 0xF3456)
+
     def test_dot_stream_decodes_motion_flags(self):
         value = bytearray(20)
         value[11] = 0x25
