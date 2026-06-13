@@ -66,6 +66,7 @@ HOME_FINAL_CRAWL_SPEED_MMPS = 60
 HOME_FINAL_CRAWL_PROX_THRESHOLD = 40
 HOME_REAR_BACKUP_MAX_MM = 250
 HOME_REAR_BACKUP_SPEED_MMPS = 60
+GO_HOME_MAX_RETRIES = 3              # replan around blockages this many times
 HOME_WALL_CLEARANCE_MM = 120        # short nudge to step off a wall just turned from
 HOME_CLEARANCE_SPEED_MMPS = 80
 HOME_CLEARANCE_MIN_TURN_DEG = 120   # only a near-reversal turn faces a wall left behind
@@ -1057,6 +1058,42 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     }
 
 
+def go_home_with_retries(data, deg_per_yaw, mm_per_wd, max_retries=GO_HOME_MAX_RETRIES):
+    """Drive home, replanning around blockages until arrival or retries run out.
+
+    Each aborted attempt that records a blocked edge and keeps a trustworthy pose
+    lets the next attempt replan around the blockage from where Dash stopped, so
+    a return that halts far from home can keep trying alternative proven routes.
+    Returns the list of run records produced; each should be saved to the map.
+    """
+    runs = []
+    data = {**data, 'runs': list(data.get('runs', []))}
+    for attempt in range(max_retries + 1):
+        try:
+            run = go_home(data, deg_per_yaw, mm_per_wd)
+        except ValueError as exc:
+            print(f"Go-home cannot proceed: {exc}")
+            break
+        runs.append(run)
+        data['runs'].append(run)
+        if run.get('status') == 'accepted':
+            break
+        if not run_pose_trustworthy(run):
+            print("  Stopping retries: final pose is no longer trustworthy.")
+            break
+        if not run.get('blocked_edges'):
+            print("  Stopping retries: halt was not a blockage to route around.")
+            break
+        if attempt < max_retries:
+            print(
+                f"\n  Retry {attempt + 1}/{max_retries}: "
+                f"replanning around the blockage..."
+            )
+        else:
+            print(f"\n  Reached max retries ({max_retries}) without arriving home.")
+    return runs
+
+
 # ---------------------------------------------------------------------------
 # Exploration
 # ---------------------------------------------------------------------------
@@ -1501,29 +1538,30 @@ def main(args=None):
     img_path = map_file.with_suffix('.png')
 
     if options.go_home:
-        try:
-            run = go_home(strategy_map, deg_per_yaw, mm_per_wd)
-        except ValueError as exc:
-            print(f"Go-home cannot proceed: {exc}")
+        produced_runs = go_home_with_retries(strategy_map, deg_per_yaw, mm_per_wd)
+        if not produced_runs:
             return
     else:
-        run = explore(
+        produced_runs = [
+            explore(
+                deg_per_yaw,
+                mm_per_wd,
+                x0,
+                y0,
+                heading0,
+                strategy_map,
+                duration=options.duration,
+            )
+        ]
+    for run in produced_runs:
+        all_runs, all_walls, all_obstacles = save_map(
             deg_per_yaw,
             mm_per_wd,
-            x0,
-            y0,
-            heading0,
-            strategy_map,
-            duration=options.duration,
+            run,
+            map_file,
+            base_data=strategy_map if source_map_file != map_file else None,
+            replace_existing=source_map_file is None,
         )
-    all_runs, all_walls, all_obstacles = save_map(
-        deg_per_yaw,
-        mm_per_wd,
-        run,
-        map_file,
-        base_data=strategy_map if source_map_file != map_file else None,
-        replace_existing=source_map_file is None,
-    )
     visualise(all_runs, all_walls, all_obstacles, img_path)
 
 

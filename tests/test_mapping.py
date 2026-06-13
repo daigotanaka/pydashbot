@@ -311,6 +311,62 @@ class MappingStrategyTests(unittest.TestCase):
             calls,
         )
 
+    def _aborted_home_run(self, blocked=True):
+        return {
+            "mode": "go_home",
+            "status": "partial",
+            "quality": {
+                "tracking_lost": False,
+                "rejected_updates": 0,
+                "issues": ["go-home leg stopped early"],
+            },
+            "blocked_edges": [{"from": [1, 1], "to": [2, 2], "stop": [1, 1]}]
+            if blocked
+            else [],
+        }
+
+    def _accepted_home_run(self):
+        return {
+            "mode": "go_home",
+            "status": "accepted",
+            "quality": {"tracking_lost": False},
+            "blocked_edges": [],
+        }
+
+    def test_go_home_retries_replan_until_arrival(self):
+        sequence = [
+            self._aborted_home_run(),
+            self._aborted_home_run(),
+            self._accepted_home_run(),
+        ]
+        with patch.object(map_room, "go_home", side_effect=sequence) as go_home:
+            runs = map_room.go_home_with_retries({"runs": []}, 1.0, 1.0, max_retries=3)
+        self.assertEqual(go_home.call_count, 3)
+        self.assertEqual(runs[-1]["status"], "accepted")
+
+    def test_go_home_retries_respect_the_max(self):
+        sequence = [self._aborted_home_run() for _ in range(10)]
+        with patch.object(map_room, "go_home", side_effect=sequence) as go_home:
+            runs = map_room.go_home_with_retries({"runs": []}, 1.0, 1.0, max_retries=3)
+        # One initial attempt plus three retries.
+        self.assertEqual(go_home.call_count, 4)
+        self.assertEqual(len(runs), 4)
+
+    def test_go_home_stops_when_halt_is_not_a_blockage(self):
+        with patch.object(
+            map_room, "go_home", side_effect=[self._aborted_home_run(blocked=False)]
+        ) as go_home:
+            map_room.go_home_with_retries({"runs": []}, 1.0, 1.0, max_retries=3)
+        self.assertEqual(go_home.call_count, 1)
+
+    def test_go_home_stops_when_no_route_remains(self):
+        with patch.object(
+            map_room, "go_home", side_effect=ValueError("no unblocked route")
+        ) as go_home:
+            runs = map_room.go_home_with_retries({"runs": []}, 1.0, 1.0, max_retries=3)
+        self.assertEqual(go_home.call_count, 1)
+        self.assertEqual(runs, [])
+
     def test_latest_map_file_includes_legacy_map(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

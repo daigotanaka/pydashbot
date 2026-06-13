@@ -111,6 +111,13 @@ planning, so the robot reroutes around a known obstruction instead of retrying
 the same corridor. When every proven route home is blocked, the command reports
 this clearly and refuses to move rather than retreating and retrying.
 
+A single `--go-home` invocation replans automatically: if an attempt aborts on a
+blockage while keeping a trustworthy pose, it records the blocked edge and tries
+an alternative proven route from where Dash stopped, up to a few times, until it
+reaches home or no unblocked route remains. Retries stop early if the pose is no
+longer trustworthy or the halt was not a blockage (for example a turn that did
+not execute), since replanning would not help those cases.
+
 Because Dash is retracing space it already traversed, go-home relaxes its
 obstacle criteria while following a proven corridor: it uses a higher proximity
 threshold and a longer confirmation streak, so it can graze past walls it
