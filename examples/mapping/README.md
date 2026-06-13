@@ -111,6 +111,20 @@ planning, so the robot reroutes around a known obstruction instead of retrying
 the same corridor. When every proven route home is blocked, the command reports
 this clearly and refuses to move rather than retreating and retrying.
 
+Because Dash is retracing space it already traversed, go-home relaxes its
+obstacle criteria while following a proven corridor: it uses a higher proximity
+threshold and a longer confirmation streak, so it can graze past walls it
+already drove past while a solid head-on wall still stops it. When a leg begins
+with a near-reversal turn that faces a wall Dash just drove away from, it takes a
+short bounded clearance nudge to step off that wall before normal stopping
+resumes. And because returning to the starting corner means approaching its
+walls head-on, an obstacle halt within a short distance of the home pose counts
+as arrival: Dash turns to the starting orientation and the run completes.
+
+Each motion reports why it halted (an obstacle with the triggering sensor
+readings, a tilt, or a stalled or under-rotated turn), and go-home prints that
+reason and stores it on the run.
+
 The command refuses to start when the map's latest run does not have a
 trustworthy final pose. The completed or aborted return is appended to the map.
 
@@ -218,58 +232,37 @@ route is blocked it stops. A future implementation could perform bounded local
 exploration to discover a new connection around an obstruction, while always
 preserving a proven retreat route back to known-safe space.
 
-### Next Challenge: Walls You Drove Away From Block the Return
+### Next Challenge: Path-Aware Obstacle Handling on the Way Home
 
-Go-home frequently stops early on a wall that Dash itself just drove away from,
-even though the space is proven traversable. This is the most common reason a
-return aborts in a tight room.
+Dash's obstacle sensing for forward motion only looks ahead (the left and right
+proximity sensors; see `_obstacle_in_path` in `dash/motion.py`). A wall that sat
+behind Dash during outbound travel becomes a wall directly ahead after the turn
+home, even though Dash already traversed that space. Go-home currently mitigates
+this with blunt, geometry-free heuristics — a relaxed proximity threshold and
+confirmation streak while retracing, a clearance nudge after a near-reversal
+turn, and accepting a near-home obstacle as arrival. These help, but they trade
+away safety margin uniformly rather than reasoning about what the obstacle is.
 
-Observed example (a real go-home run): Dash retraced a proven leg and halted
-partway with `obstacle ahead (prox L=6 R=15, threshold 15)` — a one-sided
-front-right reading right at the stop threshold, on a segment it had cleanly
-explored minutes earlier.
-
-Root cause. Dash's obstacle sensing for forward motion only looks ahead (the
-left and right proximity sensors; see `_obstacle_in_path` in `dash/motion.py`).
-During outbound exploration, a wall typically sits *behind* Dash at the end of a
-leg and is never in view. To go home, Dash turns roughly 180 degrees, so that
-same wall is now directly *ahead* and may already read at or above the stop
-threshold. `move()` treats any forward reading `>= PROXIMITY_STOP_THRESHOLD`
-(15) as a wall, with no notion that this particular wall is part of the proven
-path Dash just traversed. The result is an early stop, a recorded blocked edge,
-and — in a single-corridor map — a "no unblocked proven route home" report, even
-though the corridor is actually passable.
-
-Possible directions (a later implementation should preserve genuine obstacle
-safety while addressing this):
-
-1. **Path-aware relaxation.** Distinguish a *known* wall already in the map near
-   the proven segment from a *new* unmapped obstacle. Compare the triggering stop
-   position against `run['walls']` along the current leg: if the detected wall
-   coincides with a mapped wall on a segment Dash already traversed, continue;
-   otherwise stop as today. The halt outcome now carries the exact prox readings
-   and stop position, which makes this comparison straightforward.
-2. **Leg-start clearance.** Right after a turn at the start of a go-home leg,
-   suppress or raise the front threshold for a short initial distance until Dash
-   clears the wall it just turned away from — mirroring the docking step that
-   moves forward 80 mm to clear a wall — then restore normal detection mid-leg
-   for genuinely new obstacles.
-3. **Relaxed criteria during go-home.** `move()` already accepts
-   `proximity_threshold` and `proximity_confirm_count`; go-home could pass a
-   higher threshold and/or a longer confirmation streak while retracing, trading
-   a bounded amount of safety margin for the ability to follow tight proven
-   corridors home.
+The remaining work is to make the obstacle handling *path-aware*: distinguish a
+*known* wall already in the map near the proven segment from a *new* unmapped
+obstacle. Compare the triggering stop position (the halt outcome carries the
+exact prox readings and stop position) against `run['walls']` along the current
+leg. If the detected wall coincides with a mapped wall on a segment Dash already
+traversed, continue at normal sensitivity; otherwise stop as today. This would
+let go-home keep full obstacle sensitivity for genuinely new obstructions while
+no longer halting on walls it has already proven passable — replacing the blunt
+relaxation with a principled decision.
 
 Safety constraints:
 
 - Never disable tilt stopping.
-- Still stop for new or unmapped obstacles, and for anything not on the proven
+- Always stop for new or unmapped obstacles, and for anything not on the proven
   path.
-- Keep any relaxation bounded in distance and magnitude; do not blanket-disable
-  forward obstacle detection for a whole leg.
+- Keep obstacle-aware movement enabled; do not blanket-disable forward detection.
 - Continue recording genuinely blocked segments as blocked edges.
 
-Relevant code: `go_home` (the move loop and `turn_to`) and `describe_halt` in
+Relevant code: `go_home` (the move loop, `needs_wall_clearance`,
+`obstacle_arrival_near_home`) and `describe_halt` in
 `examples/mapping/map_room.py`; `move()`, `_obstacle_in_path`, and the
 `PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
 list in the room-map JSON.
