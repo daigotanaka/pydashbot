@@ -56,8 +56,16 @@ HOME_ROUTE_LINK_RADIUS_MM = 250
 HOME_ROUTE_COLLINEAR_DEG = 12
 HOME_MAX_LEG_MM = 1000
 HOME_POSITION_TOLERANCE_MM = 100
-HOME_OBSTACLE_ACCEPT_MM = 400       # an obstacle this close to home counts as arrival
+HOME_OBSTACLE_ACCEPT_MM = 400       # an obstacle this close to home triggers final approach
 BLOCKED_EDGE_TOLERANCE_MM = 150
+# Final approach once within HOME_OBSTACLE_ACCEPT_MM of home: creep straight at
+# home with a relaxed front threshold and slow short steps for precision, then
+# re-reference to the rear wall (mirroring docking) to nail the rear axis.
+HOME_FINAL_CRAWL_STEP_MM = 80
+HOME_FINAL_CRAWL_SPEED_MMPS = 60
+HOME_FINAL_CRAWL_PROX_THRESHOLD = 40
+HOME_REAR_BACKUP_MAX_MM = 250
+HOME_REAR_BACKUP_SPEED_MMPS = 60
 HOME_WALL_CLEARANCE_MM = 120        # short nudge to step off a wall just turned from
 HOME_CLEARANCE_SPEED_MMPS = 80
 HOME_CLEARANCE_MIN_TURN_DEG = 120   # only a near-reversal turn faces a wall left behind
@@ -828,6 +836,61 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                 return False
         return True
 
+    def crawl_home():
+        """Creep straight at home with relaxed detection and conservative motion."""
+        while math.hypot(start_x - x, start_y - y) > HOME_POSITION_TOLERANCE_MM:
+            if not turn_to(math.degrees(math.atan2(start_y - y, start_x - x))):
+                return
+            step = home_leg_distance(
+                min(HOME_FINAL_CRAWL_STEP_MM, math.hypot(start_x - x, start_y - y))
+            )
+            response = send_command(
+                'move',
+                step,
+                HOME_FINAL_CRAWL_SPEED_MMPS,
+                wall_stop_sound=None,
+                proximity_threshold=HOME_FINAL_CRAWL_PROX_THRESHOLD,
+                proximity_confirm_count=HOME_RETRACE_CONFIRM_COUNT,
+            )
+            if response.get('ok', True) is False:
+                return
+            traveled = update_pose('forward', step)
+            print(
+                f"  Crawling home: {math.hypot(start_x - x, start_y - y):.0f}mm  "
+                f"pose=({x:.0f},{y:.0f})",
+                end='\r',
+            )
+            if traveled is None or traveled < step * 0.8:
+                return  # blocked even with relaxed detection — as close as we get
+
+    def rear_reference():
+        """Re-reference to the rear wall for final precision, mirroring docking."""
+        nonlocal x, y
+        rear = send_command('get_prox_rear')['result']
+        if rear is not None and rear >= REAR_THRESHOLD:
+            return  # already against the rear wall
+        print("\n  Re-referencing to rear wall for final precision...")
+        # Reverse until the rear wall is detected (rear-obstacle-aware, bounded).
+        outcome = send_command(
+            'move', -HOME_REAR_BACKUP_MAX_MM, HOME_REAR_BACKUP_SPEED_MMPS,
+            wall_stop_sound=None,
+        ).get('result')
+        found_wall = (
+            isinstance(outcome, dict)
+            and outcome.get('halt') == 'obstacle'
+            and outcome.get('side') == 'rear'
+        )
+        if not found_wall:
+            print("  Rear wall not found within range; skipping re-reference.")
+            return
+        # Step forward to match the docked clearance and record the start pose.
+        send_command(
+            'move', DOCK_CLEARANCE_MM, HOME_REAR_BACKUP_SPEED_MMPS,
+            wall_stop_sound=None, stop_at_obstacle=False,
+        )
+        x, y = float(start_x), float(start_y)
+        path.append((x, y, heading))
+
     print("\n=== Going home ===")
     print(
         f"  Planned {sum(math.dist(a, b) for a, b in zip(route, route[1:])):.0f}mm "
@@ -948,8 +1011,12 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                 break
             prev_waypoint = (waypoint_x, waypoint_y)
 
+        if arrived:
+            crawl_home()
         if completed:
             completed = turn_to(start_heading)
+        if arrived and completed:
+            rear_reference()
         home_tolerance = HOME_OBSTACLE_ACCEPT_MM if arrived else HOME_POSITION_TOLERANCE_MM
         if completed and math.hypot(start_x - x, start_y - y) > home_tolerance:
             issues.append('final pose remained outside home tolerance')
