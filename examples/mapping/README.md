@@ -196,6 +196,7 @@ Room-map JSON files preserve every run, including:
 - The calibration scales used by the map
 - Robot path poses
 - Wall and obstacle observations
+- Conservative-exploration territory progress
 - Raw odometry events
 - Quality checks and loop-closure corrections
 - Go-home planned routes and results
@@ -336,20 +337,55 @@ Relevant code: `edge_is_blocked`, `_point_near_segment`, `collect_blocked_edges`
 and `plan_home_route` in `examples/mapping/map_room.py`; the per-run
 `blocked_edges` records in the room-map JSON.
 
-### Next Challenge: Conservative exploration
+### Conservative Exploration
 
-The robot should limit the area of the exploration to about 2 x 2 meters until
-it becomes aware of the geometry sufficiently.
+The mapper limits exploration to an initial 2 x 2 meter territory. When a
+forward leg approaches the edge of an unlocked territory, it stops short and
+chooses a new direction as though it had reached a mental wall.
 
-A long straight path may accumulate the odometer errors, and the robot will have
-less chance of safely return home. Home position is the reliable way of visually
-inspecting the map precision.
+Mental walls are planning constraints only. They are stored as
+`conservative_exploration` territory metadata on each run and are never added
+to the map's `walls` observations or rendered as real walls.
 
-So, the robot should change the direction of the exploration once it hits the
-**mental** wall of 2 x 2 meters.
+Each territory is divided into a 4 x 4 reachability grid. Cells Dash traverses
+are visited. Cells containing real wall or obstacle observations are blocked,
+unless Dash has also traversed them. A flood fill from visited cells identifies
+the remaining reachable frontier and cells cut off behind physical blockers.
+The mapper unlocks one adjacent territory after Dash has visited at least 3
+cells and no reachable unresolved frontier remains. This lets a physically
+small or enclosed area complete even when most of its 16 cells are unreachable,
+without treating mental walls as physical evidence.
 
-Also need to come up with the criteria of the sufficiently mapped 2 x 2 meters
-area before it can expand the exploration to the next 2 x 2 uncharted territory.
+Heading selection strongly prefers reachable, unvisited frontier-cell centers.
+It rejects directions with less than 200 mm of usable forward clearance and
+directions leading into cells classified as physically blocked or unreachable.
+This prevents repeated turn-only loops near a mental boundary.
+
+Real wall observations within 300 mm of each other are treated as a continuous
+wall segment by the core exploration planner, including when conservative
+exploration is disabled. These inferred segments prevent repeated sampling
+between nearby observations, but remain planning-only evidence and are never
+added to the JSON `walls` points. Conservative reachability consumes the same
+shared segments when enabled.
+
+The mapper reports major progress to stdout with `[cell complete]`,
+`[territory complete]`, and `[adjacent territory unlocked]` messages. Territory
+progress persists across `--start-with-map` runs, and expansion favors nearby
+uncharted territory so the explored region grows compactly.
+
+This feature is experimental and isolated in
+`examples/mapping/conservative_exploration.py`. Disable it without changing
+other planning behavior:
+
+```bash
+uv run --extra tools examples/mapping/map_room.py \
+  --calibration data/calibration.json \
+  --no-conservative-exploration
+```
+
+The core explorer interacts with the policy only through optional hooks for
+heading constraints, forward-distance limits, progress reporting, territory
+unlocking, and run metadata.
 
 ### Next Challenge: A Better Retry Planner
 

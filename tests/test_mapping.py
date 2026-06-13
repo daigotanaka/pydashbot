@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from examples.mapping import calibrate
+from examples.mapping import conservative_exploration as conservative
 from examples.mapping import map_room
 
 
@@ -36,6 +37,14 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(map_room.parse_args(["--duration", "2.5"]).duration, 2.5)
         with self.assertRaises(SystemExit):
             map_room.parse_args(["--duration", "0"])
+
+    def test_conservative_exploration_can_be_disabled(self):
+        self.assertFalse(map_room.parse_args([]).no_conservative_exploration)
+        self.assertTrue(
+            map_room.parse_args(
+                ["--no-conservative-exploration"]
+            ).no_conservative_exploration
+        )
 
     def test_latest_calibration_file_uses_timestamped_name(self):
         with TemporaryDirectory() as directory:
@@ -511,6 +520,19 @@ class MappingStrategyTests(unittest.TestCase):
         )
         self.assertNotEqual(angle, 0)
 
+    def test_core_strategy_avoids_inferred_continuous_wall(self):
+        walls = [(400, -100), (400, 100)]
+        wall_segments = map_room.inferred_wall_segments(walls)
+        angle = map_room.choose_exploration_angle(
+            0,
+            0,
+            0,
+            [(0, 0)],
+            [],
+            wall_segments=wall_segments,
+        )
+        self.assertNotEqual(angle, 0)
+
     def test_strategy_turns_away_from_live_proximity(self):
         left_blocked = map_room.choose_exploration_angle(
             0, 0, 0, [], [], blocked_left=20, require_turn=True
@@ -527,6 +549,183 @@ class MappingStrategyTests(unittest.TestCase):
             0, 0, 0, explored_east, [], require_turn=False
         )
         self.assertNotEqual(angle, 0)
+
+    def test_conservative_strategy_turns_before_mental_wall(self):
+        angle = map_room.choose_exploration_angle(
+            1800,
+            1000,
+            0,
+            [(1800, 1000)],
+            [],
+            point_allowed=lambda x, y: conservative.territory_cell(x, y) == (0, 0),
+        )
+        self.assertNotEqual(angle, 0)
+
+    def test_conservative_state_is_metadata_not_real_wall_knowledge(self):
+        data = {
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [[80, 80, 0]],
+                    "walls": [],
+                    "obstacles": [],
+                    "conservative_exploration": {
+                        "territories": [[0, 0], [1, 0]],
+                        "focus_territory": [1, 0],
+                    },
+                }
+            ]
+        }
+        policy = conservative.ConservativeExploration(
+            map_room.accepted_runs(data),
+            (80, 80),
+            *map_room.map_knowledge(data),
+        )
+        self.assertEqual((policy.territories, policy.focus), ([(0, 0), (1, 0)], (1, 0)))
+        self.assertEqual(map_room.map_knowledge(data), ([(80.0, 80.0)], []))
+
+    def test_explore_turns_at_mental_wall_without_recording_real_wall(self):
+        readings = {
+            "get_yaw": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
+            "get_pitch": iter([0, 0, 0, 0, 0, 0]),
+            "get_prox_left": iter([0]),
+            "get_prox_right": iter([0]),
+        }
+        calls = []
+
+        def send_command(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        times = iter([0.0, 0.0, 0.0, 1.0, 1.0, 4.0])
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(map_room.time, "time", side_effect=lambda: next(times)),
+            patch("builtins.print") as print_mock,
+            patch.object(
+                map_room,
+                "choose_exploration_angle",
+                side_effect=[0, 90],
+            ),
+            patch.object(
+                map_room,
+                "read_settled",
+                side_effect=[
+                    0, 325, 325,
+                    100, 325, 325,
+                ],
+            ),
+        ):
+            run = map_room.explore(1.0, 1.0, 1500.0, 1000.0, duration=3)
+
+        move = next(call for call in calls if call[0] == "move")
+        self.assertEqual(move[1], (325, map_room.FORWARD_SPEED_MMPS))
+        self.assertEqual(run["walls"], [])
+        self.assertEqual(run["obstacles"], [])
+        self.assertEqual(run["conservative_exploration"]["territories"], [(0, 0)])
+        output = " ".join(str(call) for call in print_mock.call_args_list)
+        self.assertIn("[cell complete]", output)
+
+    def test_explore_can_run_without_conservative_policy(self):
+        calls = []
+        readings = {
+            "get_yaw": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
+            "get_pitch": iter([0, 0, 0, 0, 0, 0]),
+            "get_prox_left": iter([0]),
+            "get_prox_right": iter([0]),
+        }
+
+        def send_command(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        times = iter([0.0, 0.0, 0.0, 1.0, 1.0, 4.0])
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(map_room.time, "time", side_effect=lambda: next(times)),
+            patch.object(map_room, "choose_exploration_angle", side_effect=[0, 90]),
+            patch.object(
+                map_room,
+                "read_settled",
+                side_effect=[0, 600, 600, 100, 600, 600],
+            ),
+        ):
+            run = map_room.explore(
+                1.0,
+                1.0,
+                1500.0,
+                1000.0,
+                duration=3,
+                conservative_exploration=False,
+            )
+
+        move = next(call for call in calls if call[0] == "move")
+        self.assertEqual(move[1], (600, map_room.FORWARD_SPEED_MMPS))
+        self.assertNotIn("conservative_exploration", run)
+
+    def test_explore_announces_adjacent_territory_unlock(self):
+        visited = [[100, y, 90] for y in (100, 600, 1100, 1600)]
+        barrier = [[600, y] for y in (100, 600, 1100, 1600)]
+        strategy_map = {
+            "schema_version": 2,
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": visited,
+                    "walls": barrier,
+                    "obstacles": [],
+                    "conservative_exploration": {
+                        "territories": [[0, 0]],
+                        "focus_territory": [0, 0],
+                    },
+                }
+            ],
+        }
+        readings = {
+            "get_yaw": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
+            "get_pitch": iter([0, 0, 0, 0, 0, 0]),
+            "get_prox_left": iter([0]),
+            "get_prox_right": iter([0]),
+        }
+
+        def send_command(method, *args, **kwargs):
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        times = iter([0.0, 0.0, 0.0, 0.5])
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(map_room.time, "time", side_effect=lambda: next(times)),
+            patch.object(map_room, "choose_exploration_angle", return_value=0),
+            patch.object(map_room, "read_settled", side_effect=[0, -1000, -1000]),
+            patch("builtins.print") as print_mock,
+        ):
+            run = map_room.explore(
+                1.0,
+                1.0,
+                100.0,
+                100.0,
+                strategy_map=strategy_map,
+                duration=1,
+            )
+
+        output = " ".join(str(call) for call in print_mock.call_args_list)
+        self.assertIn("[adjacent territory unlocked]", output)
+        self.assertEqual(
+            run["conservative_exploration"]["territories"],
+            [(0, 0), (1, 0)],
+        )
 
     def test_explore_moves_until_wall_then_turns_and_continues(self):
         calls = []

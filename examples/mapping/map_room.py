@@ -20,6 +20,20 @@ from datetime import datetime
 from pathlib import Path
 
 from dash.ws_client import send_command
+try:
+    from examples.mapping.conservative_exploration import ConservativeExploration
+    from examples.mapping.exploration_walls import (
+        WALL_SEGMENT_AVOID_MM,
+        inferred_wall_segments,
+        point_segment_distance,
+    )
+except ModuleNotFoundError:
+    from conservative_exploration import ConservativeExploration
+    from exploration_walls import (
+        WALL_SEGMENT_AVOID_MM,
+        inferred_wall_segments,
+        point_segment_distance,
+    )
 
 CAL_FILE_PATTERN = 'calibration_????????-??-??-??.json'
 MAP_FILE_PATTERN = 'room_map_????????-??-??-??.json'
@@ -45,6 +59,7 @@ INITIAL_HEADING_ANGLES = [0, -30, 30, -60, 60, -90, 90, -120, 120, -150, 150, 18
 REDIRECT_ANGLES = [-45, 45, -60, 60, -90, 90, -120, 120, -150, 150, 180]
 STRATEGY_SAMPLE_DISTANCES = [400, 800, 1200, 1600]
 BLOCKER_CORRIDOR_MM = 275
+INFERRED_WALL_PENALTY = 500000
 ODOMETRY_SIGN_TOLERANCE_MM = 40
 ODOMETRY_MAX_MOVE_HEADING_DEG = 45
 ODOMETRY_MAX_TURN_DISTANCE_MM = 150
@@ -107,6 +122,16 @@ def parse_args(args=None):
             "using its knowledge to choose exploration headings"
         ),
     )
+    mode.add_argument(
+        '--resume',
+        nargs='?',
+        const='latest',
+        metavar='MAP_FILE',
+        help=(
+            "continue exploring from MAP_FILE's final saved pose without "
+            "docking; without MAP_FILE, use the newest room map"
+        ),
+    )
     parser.add_argument(
         '--calibration',
         metavar='CAL_FILE',
@@ -126,6 +151,11 @@ def parse_args(args=None):
         default=DURATION,
         metavar='SECONDS',
         help=f"exploration run time in seconds (default: {DURATION})",
+    )
+    parser.add_argument(
+        '--no-conservative-exploration',
+        action='store_true',
+        help="disable the experimental bounded-territory exploration policy",
     )
     return parser.parse_args(args)
 
@@ -273,6 +303,9 @@ def heading_score(
     blockers,
     blocked_left=0,
     blocked_right=0,
+    point_allowed=None,
+    heading_preference=None,
+    wall_segments=(),
 ):
     """Score a candidate heading for clearance and expected map knowledge."""
     hr = math.radians(heading + turn_angle)
@@ -281,6 +314,9 @@ def heading_score(
 
     for distance in STRATEGY_SAMPLE_DISTANCES:
         sx, sy = x + distance * ux, y + distance * uy
+        if point_allowed is not None and not point_allowed(sx, sy):
+            score -= 5000
+            continue
         if path_points:
             nearest = min(math.hypot(sx - px, sy - py) for px, py in path_points)
             score += min(nearest, 800) * 0.35
@@ -295,12 +331,23 @@ def heading_score(
             score -= (BLOCKER_CORRIDOR_MM - lateral) * 8
             score -= (2000 - forward) * 1.5
 
+    for distance in STRATEGY_SAMPLE_DISTANCES:
+        point = x + distance * ux, y + distance * uy
+        if any(
+            point_segment_distance(point, start, end) <= WALL_SEGMENT_AVOID_MM
+            for start, end in wall_segments
+        ):
+            score -= INFERRED_WALL_PENALTY
+            break
+
     if blocked_left >= PROX_THRESHOLD and turn_angle > 0:
         score -= 2500
     if blocked_right >= PROX_THRESHOLD and turn_angle < 0:
         score -= 2500
     if blocked_left >= PROX_THRESHOLD and blocked_right >= PROX_THRESHOLD:
         score += abs(turn_angle) * 8
+    if heading_preference is not None:
+        score += heading_preference(x, y, normalize_heading(heading + turn_angle))
     return score
 
 
@@ -313,6 +360,9 @@ def choose_exploration_angle(
     blocked_left=0,
     blocked_right=0,
     require_turn=False,
+    point_allowed=None,
+    heading_preference=None,
+    wall_segments=(),
 ):
     """Choose the highest-value relative turn using saved and live knowledge."""
     candidates = REDIRECT_ANGLES if require_turn else INITIAL_HEADING_ANGLES
@@ -327,6 +377,9 @@ def choose_exploration_angle(
             blockers,
             blocked_left,
             blocked_right,
+            point_allowed,
+            heading_preference,
+            wall_segments,
         ),
     )
 
@@ -1115,6 +1168,7 @@ def explore(
     heading0=0.0,
     strategy_map=None,
     duration=DURATION,
+    conservative_exploration=True,
 ):
     yaw_prev = send_command('get_yaw')['result']
     left_prev = send_command('get_left_wheel')['result']
@@ -1148,6 +1202,18 @@ def explore(
         for run in accepted_runs(strategy_map or {})
         for point in run.get('obstacles', [])
     ]
+    known_wall_segments = inferred_wall_segments(known_walls)
+    policy = (
+        ConservativeExploration(
+            accepted_runs(strategy_map or {}),
+            (x, y),
+            known_path,
+            known_blockers,
+            known_wall_segments,
+        )
+        if conservative_exploration
+        else None
+    )
     known_path.append((x, y))
 
     def update_pose(action, requested):
@@ -1192,12 +1258,16 @@ def explore(
             path.append((x, y, heading))
             known_path.append((x, y))
             quality['accepted_updates'] += 1
+            if policy:
+                policy.report_progress()
         events.append(event)
         if not event['accepted']:
             return None
         return d_mm
 
     def turn_toward_knowledge(reason, left=0, right=0, require_turn=False):
+        if policy:
+            policy.unlock_if_complete()
         turn_angle = choose_exploration_angle(
             x,
             y,
@@ -1207,6 +1277,9 @@ def explore(
             blocked_left=left,
             blocked_right=right,
             require_turn=require_turn,
+            point_allowed=policy.allows_point if policy else None,
+            heading_preference=policy.heading_preference if policy else None,
+            wall_segments=known_wall_segments,
         )
         print(f'\n  [{reason}] map-guided turn {turn_angle:+.0f}°')
         for step in tracked_turn_steps(turn_angle):
@@ -1264,6 +1337,10 @@ def explore(
         points.append(point)
         landmarks.append(point)
         known_blockers.append(point)
+        if points is walls:
+            known_wall_segments[:] = inferred_wall_segments(known_walls)
+        if policy:
+            policy.report_progress()
 
     def report_leg(remaining, traveled, left, right, tilt):
         print(
@@ -1273,7 +1350,7 @@ def explore(
             end='\r',
         )
 
-    def handle_leg_end(traveled, requested_distance):
+    def handle_leg_end(traveled, requested_distance, policy_limit_reached=False):
         left = send_command('get_prox_left')['result']
         right = send_command('get_prox_right')['result']
         pitch = send_command('get_pitch')['result']
@@ -1288,6 +1365,8 @@ def explore(
         if abs(traveled) < requested_distance * 0.8:
             mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
             return left, right, tilt, 'early stop', WALL_SOUNDS, True
+        if policy_limit_reached:
+            return left, right, tilt, 'exploration boundary', None, False
         return left, right, tilt, 'forward leg complete', None, False
 
     def stop_safely():
@@ -1300,8 +1379,14 @@ def explore(
         f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
         "walls and tilt stop each leg early."
     )
+    if policy:
+        print(policy.describe())
+    else:
+        print("  Experimental conservative exploration disabled.")
     send_command('say', 'hi')
     send_command('neck_color', '#00ff00')
+    if policy:
+        policy.report_progress()
     turn_toward_knowledge('initial strategy')
 
     end_time = time.time() + duration
@@ -1309,7 +1394,16 @@ def explore(
     try:
         while time.time() < end_time and not quality['tracking_lost']:
             remaining = end_time - time.time()
-            requested_distance = forward_distance_for_remaining(remaining)
+            desired_distance = forward_distance_for_remaining(remaining)
+            requested_distance = (
+                policy.forward_distance(x, y, heading, desired_distance)
+                if policy
+                else desired_distance
+            )
+            policy_limit_reached = requested_distance < desired_distance
+            if requested_distance < MIN_FORWARD_DISTANCE_MM:
+                redirect('exploration boundary')
+                continue
             send_command(
                 'move',
                 requested_distance,
@@ -1328,7 +1422,9 @@ def explore(
                 break
             else:
                 left, right, tilt, reason, sounds, back_away = handle_leg_end(
-                    traveled, requested_distance
+                    traveled,
+                    requested_distance,
+                    policy_limit_reached,
                 )
             report_leg(remaining, traveled, left, right, tilt)
 
@@ -1349,6 +1445,7 @@ def explore(
         'path': path,
         'walls': walls,
         'obstacles': obstacles,
+        **({policy.metadata_key: policy.metadata()} if policy else {}),
         'events': events,
     }
 
@@ -1503,11 +1600,12 @@ def main(args=None):
 
     strategy_map = {}
     source_map_file = None
-    if options.go_home:
+    if options.go_home or options.resume:
+        selected_map = options.go_home or options.resume
         source_map_file = (
             latest_map_file()
-            if options.go_home == 'latest'
-            else Path(options.go_home)
+            if selected_map == 'latest'
+            else Path(selected_map)
         )
         strategy_map = load_map_data(source_map_file)
         deg_per_yaw, mm_per_wd, x0, y0, heading0 = load_resume_state(source_map_file)
@@ -1561,6 +1659,7 @@ def main(args=None):
                 heading0,
                 strategy_map,
                 duration=options.duration,
+                conservative_exploration=not options.no_conservative_exploration,
             )
         ]
     for run in produced_runs:
