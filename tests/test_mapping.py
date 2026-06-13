@@ -1,0 +1,315 @@
+import json
+import unittest
+from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from examples.mapping import calibrate
+from examples.mapping import map_room
+
+
+class MappingStrategyTests(unittest.TestCase):
+    def test_output_paths_include_requested_timestamp(self):
+        now = datetime(2026, 6, 12, 14, 5, 9)
+        expected = Path("calibration_20260612-14-05-09.json")
+        self.assertEqual(calibrate.timestamped_path("calibration", ".json", now), expected)
+        self.assertEqual(map_room.timestamped_path("calibration", ".json", now), expected)
+        self.assertEqual(
+            map_room.timestamped_path("room_map", ".png", now),
+            Path("room_map_20260612-14-05-09.png"),
+        )
+
+    def test_output_argument_accepts_exact_file_path(self):
+        self.assertEqual(
+            calibrate.parse_args(["--output", "data/my_calibration.json"]).output,
+            "data/my_calibration.json",
+        )
+        self.assertEqual(
+            map_room.parse_args(["--output", "data/my_map.json"]).output,
+            "data/my_map.json",
+        )
+
+    def test_latest_calibration_file_uses_timestamped_name(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            older = root / "calibration_20260611-23-59-59.json"
+            newer = root / "calibration_20260612-14-05-09.json"
+            legacy = root / "calibration.json"
+            for path in (newer, legacy, older):
+                path.write_text("{}")
+            self.assertEqual(map_room.latest_calibration_file(root), newer)
+
+    def test_resume_argument_accepts_latest_or_explicit_map(self):
+        self.assertEqual(map_room.parse_args(["--resume"]).resume, "latest")
+        self.assertEqual(
+            map_room.parse_args(["--resume", "room_map.json"]).resume,
+            "room_map.json",
+        )
+        self.assertEqual(
+            map_room.parse_args(["--start-with-map"]).start_with_map,
+            "latest",
+        )
+        self.assertEqual(
+            map_room.parse_args(
+                ["--start-with-map", "room_map.json"]
+            ).start_with_map,
+            "room_map.json",
+        )
+        self.assertEqual(
+            map_room.parse_args(
+                ["--start-with-map", "room_map.json", "--calibration", "calibration.json"]
+            ).calibration,
+            "calibration.json",
+        )
+
+    def test_load_resume_state_uses_last_pose_and_map_calibration(self):
+        with TemporaryDirectory() as directory:
+            map_file = Path(directory) / "room_map.json"
+            map_file.write_text(
+                '{"calibration":{"deg_per_yaw":0.5,"mm_per_wd":0.25},'
+                '"runs":[{"path":[[1,2,3],[4,5,6]]}]}'
+            )
+            self.assertEqual(
+                map_room.load_resume_state(map_file),
+                (0.5, 0.25, 4.0, 5.0, 6.0),
+            )
+
+    def test_map_start_pose_uses_first_saved_pose(self):
+        data = {"runs": [{"path": [[10, 20, 30], [40, 50, 60]]}]}
+        self.assertEqual(map_room.map_start_pose(data), (10.0, 20.0, 30.0))
+
+    def test_latest_map_file_includes_legacy_map(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "room_map.json"
+            legacy.write_text("{}")
+            self.assertEqual(map_room.latest_map_file(root), legacy)
+
+    def test_forward_distance_is_integer_and_fits_remaining_time(self):
+        self.assertEqual(map_room.forward_distance_for_remaining(60), 3000)
+        self.assertEqual(map_room.forward_distance_for_remaining(2.5), 500)
+        self.assertEqual(map_room.forward_distance_for_remaining(0.1), 200)
+
+    def test_odometry_validation_rejects_negative_forward_distance(self):
+        issues = map_room.validate_odometry("forward", 3000, -1668, -2.6)
+        self.assertIn("forward move measured negative distance", issues)
+
+    def test_odometry_validation_rejects_implausible_turn(self):
+        issues = map_room.validate_odometry("turn", 90, 0, 372)
+        self.assertIn("turn measured excessive heading change", issues)
+
+    def test_map_knowledge_uses_only_accepted_runs(self):
+        data = {
+            "schema_version": 2,
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [[1, 2, 0]],
+                    "walls": [[3, 4]],
+                    "obstacles": [],
+                },
+                {
+                    "status": "suspect",
+                    "path": [[100, 200, 0]],
+                    "walls": [[300, 400]],
+                    "obstacles": [],
+                },
+            ],
+        }
+        self.assertEqual(map_room.map_knowledge(data), ([(1.0, 2.0)], [(3.0, 4.0)]))
+
+    def test_strategy_avoids_known_blockers(self):
+        blockers = [(400, 0), (800, 0), (1200, 0)]
+        angle = map_room.choose_exploration_angle(
+            0, 0, 0, [(0, 0)], blockers
+        )
+        self.assertNotEqual(angle, 0)
+
+    def test_strategy_turns_away_from_live_proximity(self):
+        left_blocked = map_room.choose_exploration_angle(
+            0, 0, 0, [], [], blocked_left=20, require_turn=True
+        )
+        right_blocked = map_room.choose_exploration_angle(
+            0, 0, 0, [], [], blocked_right=20, require_turn=True
+        )
+        self.assertLess(left_blocked, 0)
+        self.assertGreater(right_blocked, 0)
+
+    def test_strategy_rewards_unexplored_direction(self):
+        explored_east = [(distance, 0) for distance in (400, 800, 1200, 1600)]
+        angle = map_room.choose_exploration_angle(
+            0, 0, 0, explored_east, [], require_turn=False
+        )
+        self.assertNotEqual(angle, 0)
+
+    def test_explore_moves_until_wall_then_turns_and_continues(self):
+        calls = []
+        readings = {
+            "get_yaw": iter([0]),
+            "get_wheel_distance": iter([0]),
+            "get_pitch": iter([0, 0, 0, 0, 0, 0]),
+            "get_prox_left": iter([20]),
+            "get_prox_right": iter([0]),
+        }
+
+        def send_command(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        times = iter([0.0, 0.0, 0.0, 0.5, 0.5, 1.1])
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(map_room.time, "time", side_effect=lambda: next(times)),
+            patch.object(map_room, "DURATION", 1),
+            patch.object(
+                map_room,
+                "choose_exploration_angle",
+                side_effect=[0, 90],
+            ),
+            patch.object(map_room.random, "choice", return_value="okay"),
+            patch.object(
+                map_room,
+                "read_settled",
+                side_effect=[0, 100, 0, 50, 100, 50],
+            ),
+        ):
+            run = map_room.explore(1.0, 1.0, 0.0, 0.0)
+
+        methods = [method for method, _, _ in calls]
+        move = next(call for call in calls if call[0] == "move")
+        self.assertEqual(move[1], (200, map_room.FORWARD_SPEED_MMPS))
+        self.assertEqual(move[2], {"wall_stop_sound": None})
+        self.assertIn("turn", methods)
+        self.assertNotIn("drive", methods)
+        self.assertEqual(run["status"], "accepted")
+        self.assertEqual(len(run["path"]), 4)
+        self.assertEqual(len(run["walls"]), 1)
+        self.assertEqual(run["obstacles"], [])
+
+    def test_rejected_odometry_stops_run_without_mapping_bad_pose(self):
+        readings = {
+            "get_yaw": iter([0]),
+            "get_wheel_distance": iter([0]),
+            "get_pitch": iter([0, 0, 0, 0, 0, 0]),
+            "get_prox_left": iter([0]),
+            "get_prox_right": iter([0]),
+        }
+
+        def send_command(method, *args, **kwargs):
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        times = iter([0.0, 0.0, 0.0, 0.5])
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(map_room.time, "time", side_effect=lambda: next(times)),
+            patch.object(map_room, "DURATION", 1),
+            patch.object(map_room, "choose_exploration_angle", return_value=0),
+            patch.object(map_room, "read_settled", side_effect=[0, -1000]),
+        ):
+            run = map_room.explore(1.0, 1.0, 0.0, 0.0)
+
+        self.assertEqual(run["status"], "partial")
+        self.assertEqual(run["path"], [(0.0, 0.0, 0.0)])
+        self.assertEqual(run["walls"], [])
+        self.assertEqual(run["quality"]["rejected_updates"], 1)
+        self.assertFalse(run["events"][0]["accepted"])
+
+    def test_save_map_excludes_suspect_run_observations(self):
+        accepted = {
+            "timestamp": "accepted",
+            "status": "accepted",
+            "path": [[0, 0, 0]],
+            "walls": [[1, 2]],
+            "obstacles": [],
+            "events": [],
+            "quality": {},
+        }
+        suspect = {
+            "timestamp": "suspect",
+            "status": "rejected",
+            "path": [[9, 9, 0]],
+            "walls": [[8, 8]],
+            "obstacles": [[7, 7]],
+            "events": [],
+            "quality": {},
+        }
+        with TemporaryDirectory() as directory:
+            map_file = Path(directory) / "room_map.json"
+            map_room.save_map(1.0, 2.0, accepted, map_file)
+            map_room.save_map(1.0, 2.0, suspect, map_file)
+            data = json.loads(map_file.read_text())
+        self.assertEqual(data["schema_version"], 2)
+        self.assertEqual(data["walls"], [[1, 2]])
+        self.assertEqual(data["obstacles"], [])
+
+    def test_save_map_can_seed_separate_output_from_source_map(self):
+        previous = {
+            "schema_version": 2,
+            "calibration": {"deg_per_yaw": 1.0, "mm_per_wd": 2.0},
+            "runs": [
+                {
+                    "timestamp": "previous",
+                    "status": "accepted",
+                    "path": [[0, 0, 0]],
+                    "walls": [[1, 2]],
+                    "obstacles": [],
+                    "events": [],
+                    "quality": {},
+                }
+            ],
+            "walls": [[1, 2]],
+            "obstacles": [],
+        }
+        new_run = {
+            "timestamp": "new",
+            "status": "accepted",
+            "path": [[3, 4, 0]],
+            "walls": [[5, 6]],
+            "obstacles": [],
+            "events": [],
+            "quality": {},
+        }
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "nested" / "map.json"
+            map_room.save_map(1.0, 2.0, new_run, output, base_data=previous)
+            data = json.loads(output.read_text())
+        self.assertEqual(len(data["runs"]), 2)
+        self.assertEqual(data["walls"], [[1, 2], [5, 6]])
+
+    def test_fresh_save_replaces_existing_map(self):
+        old_run = {
+            "timestamp": "old",
+            "status": "accepted",
+            "path": [[0, 0, 0]],
+            "walls": [[1, 2]],
+            "obstacles": [],
+            "events": [],
+            "quality": {},
+        }
+        new_run = {
+            "timestamp": "new",
+            "status": "accepted",
+            "path": [[3, 4, 0]],
+            "walls": [[5, 6]],
+            "obstacles": [],
+            "events": [],
+            "quality": {},
+        }
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "room_map.json"
+            map_room.save_map(1.0, 2.0, old_run, output)
+            map_room.save_map(
+                1.0, 2.0, new_run, output, replace_existing=True
+            )
+            data = json.loads(output.read_text())
+        self.assertEqual([run["timestamp"] for run in data["runs"]], ["new"])
+        self.assertEqual(data["walls"], [[5, 6]])
+
+
+if __name__ == "__main__":
+    unittest.main()

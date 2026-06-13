@@ -4,6 +4,7 @@
 Start ``uv run pydashbot-server`` first and place the robot in open space.
 """
 
+import argparse
 import json
 import time
 from collections import Counter
@@ -12,8 +13,23 @@ from pathlib import Path
 
 from dash.ws_client import send_command
 
-CAL_FILE = Path('calibration.json')
 CAL_DISTANCE_MM = 300
+
+
+def parse_args(args=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--output',
+        metavar='FILE_PATH',
+        help="write calibration JSON to FILE_PATH instead of a timestamped filename",
+    )
+    return parser.parse_args(args)
+
+
+def timestamped_path(stem, suffix, now=None):
+    """Return a path with a `_YYYYMMDD-HH-MM-SS` timestamp suffix."""
+    now = now or datetime.now()
+    return Path(f"{stem}_{now.strftime('%Y%m%d-%H-%M-%S')}{suffix}")
 
 
 def read_settled(getter, stable=5, tol=2, timeout=4.0, poll=0.1):
@@ -46,7 +62,8 @@ def wrap_delta(prev, curr, bits):
     return d
 
 
-def main():
+def main(args=None):
+    options = parse_args(args)
     print("=== Calibration ===")
     send_command('stop')
     time.sleep(1.5)
@@ -95,9 +112,15 @@ def main():
         'wd_sign': wd_sign,
         'timestamp': datetime.now().isoformat(timespec='seconds'),
     }
-    CAL_FILE.write_text(json.dumps(cal, indent=2))
-    print(f"\nCalibration saved -> {CAL_FILE}")
-    print("\nRun uv run --extra tools tools/map_room.py to start mapping.")
+    cal_file = (
+        Path(options.output)
+        if options.output
+        else timestamped_path('calibration', '.json')
+    )
+    cal_file.parent.mkdir(parents=True, exist_ok=True)
+    cal_file.write_text(json.dumps(cal, indent=2))
+    print(f"\nCalibration saved -> {cal_file}")
+    print("\nRun uv run --extra tools examples/mapping/map_room.py to start mapping.")
 
 
 if __name__ == "__main__":
