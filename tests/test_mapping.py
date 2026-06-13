@@ -233,6 +233,16 @@ class MappingStrategyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no unblocked proven route"):
             map_room.plan_home_route(data)
 
+    def test_obstacle_near_home_counts_as_arrival(self):
+        obstacle = {"halt": "obstacle", "side": "front", "prox_left": 30, "prox_right": 27}
+        # An obstacle within tolerance of home is arrival at the corner walls.
+        self.assertTrue(map_room.obstacle_arrival_near_home(231, obstacle))
+        # The same obstacle far from home is a genuine blocked route.
+        self.assertFalse(map_room.obstacle_arrival_near_home(800, obstacle))
+        # A non-obstacle halt near home does not count (e.g. odometry/turn issue).
+        self.assertFalse(map_room.obstacle_arrival_near_home(100, {"halt": "completed"}))
+        self.assertFalse(map_room.obstacle_arrival_near_home(100, None))
+
     def test_wall_clearance_only_after_large_turn_into_a_wall(self):
         threshold = map_room.PROX_THRESHOLD
         # Near-reversal turn facing a wall just left -> nudge to clear it.

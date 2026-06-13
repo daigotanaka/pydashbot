@@ -56,6 +56,7 @@ HOME_ROUTE_LINK_RADIUS_MM = 250
 HOME_ROUTE_COLLINEAR_DEG = 12
 HOME_MAX_LEG_MM = 1000
 HOME_POSITION_TOLERANCE_MM = 100
+HOME_OBSTACLE_ACCEPT_MM = 300       # an obstacle this close to home counts as arrival
 BLOCKED_EDGE_TOLERANCE_MM = 150
 HOME_WALL_CLEARANCE_MM = 120        # short nudge to step off a wall just turned from
 HOME_CLEARANCE_SPEED_MMPS = 80
@@ -724,6 +725,21 @@ def describe_halt(outcome, deg_per_yaw=None):
     return str(outcome)
 
 
+def obstacle_arrival_near_home(distance_to_home, move_outcome, tolerance=HOME_OBSTACLE_ACCEPT_MM):
+    """Whether an obstacle halt this close to home should count as arrival.
+
+    Returning to the starting corner means approaching its walls head-on, so the
+    forward sensors stop Dash a short distance out. When the halt is an obstacle
+    and Dash is already within tolerance of the home pose, treat it as arrival
+    rather than a blocked route, and finish by turning to the start orientation.
+    """
+    return (
+        distance_to_home <= tolerance
+        and isinstance(move_outcome, dict)
+        and move_outcome.get('halt') == 'obstacle'
+    )
+
+
 def needs_wall_clearance(leg_turn_deg, prox_left, prox_right, threshold=PROX_THRESHOLD):
     """Whether a leg should begin with a clearance nudge off a wall just left.
 
@@ -820,6 +836,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     send_command('say', 'okay')
     send_command('neck_color', '#00ffff')
     completed = True
+    arrived = False
 
     try:
         prev_waypoint = route[0]
@@ -896,6 +913,17 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                         move_outcome = response.get('result')
                         traveled = update_pose('forward', requested)
                 if traveled is None or traveled < requested * 0.8:
+                    distance_home = math.hypot(start_x - x, start_y - y)
+                    if traveled is not None and obstacle_arrival_near_home(
+                        distance_home, move_outcome
+                    ):
+                        arrived = True
+                        print(
+                            f"\n  Obstacle {distance_home:.0f}mm from home "
+                            f"({describe_halt(move_outcome, deg_per_yaw)}) — "
+                            f"close enough, treating as arrival."
+                        )
+                        break
                     issues.append('go-home leg stopped early')
                     halt_reason = move_outcome
                     print(
@@ -916,13 +944,14 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                     f"pose=({x:.0f},{y:.0f}) heading={heading:.1f}°",
                     end='\r',
                 )
-            if not completed:
+            if arrived or not completed:
                 break
             prev_waypoint = (waypoint_x, waypoint_y)
 
         if completed:
             completed = turn_to(start_heading)
-        if completed and math.hypot(start_x - x, start_y - y) > HOME_POSITION_TOLERANCE_MM:
+        home_tolerance = HOME_OBSTACLE_ACCEPT_MM if arrived else HOME_POSITION_TOLERANCE_MM
+        if completed and math.hypot(start_x - x, start_y - y) > home_tolerance:
             issues.append('final pose remained outside home tolerance')
             completed = False
     except KeyboardInterrupt:
@@ -950,6 +979,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
             'tracking_lost': odometry_rejected,
             'issues': issues,
             'halt_reason': halt_reason,
+            'arrived_blocked_near_home': arrived,
         },
         'planned_route': route,
         'path': path,
