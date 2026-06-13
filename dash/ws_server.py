@@ -27,6 +27,12 @@ def parse_args(args=None):
     parser.add_argument(
         "--port", type=int, default=PORT, help=f"Port to bind (default: {PORT})"
     )
+    parser.add_argument(
+        "--silent",
+        action="store_true",
+        help="Suppress all robot sounds for the session, including ones requested "
+        "by clients and internal safety sounds",
+    )
     robot = parser.add_mutually_exclusive_group()
     robot.add_argument(
         "--name",
@@ -38,6 +44,19 @@ def parse_args(args=None):
         help="Bluetooth address to connect to directly without discovery",
     )
     return parser.parse_args(args)
+
+
+def silence_robot(robot):
+    """Replace say() with a no-op so no sound plays for the rest of the session.
+
+    The replacement lives on the underlying async robot, so it covers client
+    "say" commands, the server's own greetings, and the motion layer's internal
+    safety sounds, which all route through the same method.
+    """
+    async def _silent_say(*args, **kwargs):
+        return None
+
+    robot.async_robot.say = _silent_say
 
 
 def greet_robot(robot):
@@ -95,6 +114,10 @@ def main():
         print("No robot found.", flush=True)
         sys.exit(1)
     print(f"Connected: {robot._robot.address} ({type(robot._robot).__name__})", flush=True)
+
+    if args.silent:
+        silence_robot(robot)
+        print("Silent mode: robot sounds are suppressed.", flush=True)
 
     try:
         greet_robot(robot)

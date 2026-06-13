@@ -9,6 +9,7 @@ from dash.ws_server import (
     greet_robot,
     parse_args as parse_server_args,
     say_goodbye_and_disconnect,
+    silence_robot,
 )
 
 
@@ -101,6 +102,33 @@ class WebSocketArgumentTests(unittest.TestCase):
 
         self.assertTrue(args.no_wall_sound)
         self.assertEqual(args.method, "move")
+
+    def test_server_silent_defaults_off_and_accepts_flag(self):
+        self.assertFalse(parse_server_args([]).silent)
+        self.assertTrue(parse_server_args(["--silent"]).silent)
+
+
+class SilentModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_silence_robot_makes_say_a_no_op(self):
+        class AsyncRobot:
+            def __init__(self):
+                self.said = []
+
+            async def say(self, sound):
+                self.said.append(sound)
+
+        class Facade:
+            def __init__(self, robot):
+                self.async_robot = robot
+
+        robot = AsyncRobot()
+        facade = Facade(robot)
+
+        silence_robot(facade)
+        result = await robot.say("confused8")
+
+        self.assertIsNone(result)
+        self.assertEqual(robot.said, [])
 
 
 class WebSocketLifecycleTests(unittest.TestCase):

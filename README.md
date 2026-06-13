@@ -283,8 +283,15 @@ uv run pydashbot-server --address AA:BB:CC:DD:EE:FF
 
 `--name` and `--address` are mutually exclusive. The default name is `Doodle`.
 
+Suppress all robot sounds for the whole session, including ones requested by
+clients and internal safety sounds:
+
+```bash
+uv run pydashbot-server --silent
+```
+
 Dash says `hi` after the server connects to it and `bye` when the server shuts
-down and disconnects.
+down and disconnects, unless `--silent` is used.
 
 Use the WebSocket client:
 
