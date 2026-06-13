@@ -218,6 +218,62 @@ route is blocked it stops. A future implementation could perform bounded local
 exploration to discover a new connection around an obstruction, while always
 preserving a proven retreat route back to known-safe space.
 
+### Next Challenge: Walls You Drove Away From Block the Return
+
+Go-home frequently stops early on a wall that Dash itself just drove away from,
+even though the space is proven traversable. This is the most common reason a
+return aborts in a tight room.
+
+Observed example (a real go-home run): Dash retraced a proven leg and halted
+partway with `obstacle ahead (prox L=6 R=15, threshold 15)` — a one-sided
+front-right reading right at the stop threshold, on a segment it had cleanly
+explored minutes earlier.
+
+Root cause. Dash's obstacle sensing for forward motion only looks ahead (the
+left and right proximity sensors; see `_obstacle_in_path` in `dash/motion.py`).
+During outbound exploration, a wall typically sits *behind* Dash at the end of a
+leg and is never in view. To go home, Dash turns roughly 180 degrees, so that
+same wall is now directly *ahead* and may already read at or above the stop
+threshold. `move()` treats any forward reading `>= PROXIMITY_STOP_THRESHOLD`
+(15) as a wall, with no notion that this particular wall is part of the proven
+path Dash just traversed. The result is an early stop, a recorded blocked edge,
+and — in a single-corridor map — a "no unblocked proven route home" report, even
+though the corridor is actually passable.
+
+Possible directions (a later implementation should preserve genuine obstacle
+safety while addressing this):
+
+1. **Path-aware relaxation.** Distinguish a *known* wall already in the map near
+   the proven segment from a *new* unmapped obstacle. Compare the triggering stop
+   position against `run['walls']` along the current leg: if the detected wall
+   coincides with a mapped wall on a segment Dash already traversed, continue;
+   otherwise stop as today. The halt outcome now carries the exact prox readings
+   and stop position, which makes this comparison straightforward.
+2. **Leg-start clearance.** Right after a turn at the start of a go-home leg,
+   suppress or raise the front threshold for a short initial distance until Dash
+   clears the wall it just turned away from — mirroring the docking step that
+   moves forward 80 mm to clear a wall — then restore normal detection mid-leg
+   for genuinely new obstacles.
+3. **Relaxed criteria during go-home.** `move()` already accepts
+   `proximity_threshold` and `proximity_confirm_count`; go-home could pass a
+   higher threshold and/or a longer confirmation streak while retracing, trading
+   a bounded amount of safety margin for the ability to follow tight proven
+   corridors home.
+
+Safety constraints:
+
+- Never disable tilt stopping.
+- Still stop for new or unmapped obstacles, and for anything not on the proven
+  path.
+- Keep any relaxation bounded in distance and magnitude; do not blanket-disable
+  forward obstacle detection for a whole leg.
+- Continue recording genuinely blocked segments as blocked edges.
+
+Relevant code: `go_home` (the move loop and `turn_to`) and `describe_halt` in
+`examples/mapping/map_room.py`; `move()`, `_obstacle_in_path`, and the
+`PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
+list in the room-map JSON.
+
 ## Command Reference
 
 Show all mapper options:
