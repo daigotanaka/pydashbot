@@ -21,14 +21,17 @@ from pathlib import Path
 
 from dash.ws_client import send_command
 try:
-    from examples.mapping.conservative_exploration import ConservativeExploration
+    from examples.mapping.conservative_exploration import (
+        ConservativeExploration,
+        TERRITORY_MM,
+    )
     from examples.mapping.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
     )
 except ModuleNotFoundError:
-    from conservative_exploration import ConservativeExploration
+    from conservative_exploration import ConservativeExploration, TERRITORY_MM
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
@@ -157,6 +160,17 @@ def parse_args(args=None):
         action='store_true',
         help="disable the experimental bounded-territory exploration policy",
     )
+    parser.add_argument(
+        '--territory-size',
+        type=positive_mm,
+        default=TERRITORY_MM,
+        metavar='MM',
+        help=(
+            "side length in mm of each conservative-exploration territory "
+            f"(default: {TERRITORY_MM}); smaller territories unlock sooner and "
+            "resolve walled-off cells at finer granularity"
+        ),
+    )
     return parser.parse_args(args)
 
 
@@ -165,6 +179,13 @@ def positive_seconds(value):
     if seconds <= 0:
         raise argparse.ArgumentTypeError("duration must be greater than zero")
     return seconds
+
+
+def positive_mm(value):
+    millimeters = float(value)
+    if millimeters <= 0:
+        raise argparse.ArgumentTypeError("territory size must be greater than zero")
+    return millimeters
 
 
 def wrap_delta(prev, curr, bits):
@@ -1169,6 +1190,7 @@ def explore(
     strategy_map=None,
     duration=DURATION,
     conservative_exploration=True,
+    territory_mm=TERRITORY_MM,
 ):
     yaw_prev = send_command('get_yaw')['result']
     left_prev = send_command('get_left_wheel')['result']
@@ -1210,6 +1232,7 @@ def explore(
             known_path,
             known_blockers,
             known_wall_segments,
+            territory_mm,
         )
         if conservative_exploration
         else None
@@ -1509,82 +1532,6 @@ def save_map(
 
 
 # ---------------------------------------------------------------------------
-# Visualise
-# ---------------------------------------------------------------------------
-def visualise(all_runs, all_walls, all_obstacles, img_path):
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-
-    COLORS = ['#4477cc', '#44aa77', '#cc7744', '#aa44aa', '#cc4444']
-
-    fig, ax = plt.subplots(figsize=(11, 10))
-
-    # Corner origin marker
-    ax.plot(0, 0, 'k+', markersize=16, markeredgewidth=2, zorder=8, label='Corner (0,0)')
-
-    for i, run in enumerate(all_runs):
-        if run.get('status', 'accepted') not in {'accepted', 'partial'}:
-            continue
-        rpath = run['path']
-        if not rpath:
-            continue
-        color = COLORS[i % len(COLORS)]
-        px = [p[0] for p in rpath]
-        py = [p[1] for p in rpath]
-        label = f'Run {i+1} ({run["timestamp"][:10]})'
-        ax.plot(px, py, '-', color=color, alpha=0.4, linewidth=1, label=label)
-        ax.plot(px[0],  py[0],  'o', color=color, markersize=8,  zorder=6)
-        ax.plot(px[-1], py[-1], 's', color=color, markersize=7,  zorder=6)
-        step = max(1, len(rpath) // 15)
-        for j in range(0, len(rpath) - step, step):
-            dx = px[j+step] - px[j]
-            dy = py[j+step] - py[j]
-            if math.hypot(dx, dy) > 1:
-                ax.annotate('', xy=(px[j+step], py[j+step]), xytext=(px[j], py[j]),
-                            arrowprops=dict(arrowstyle='->', color=color, lw=1.0))
-
-    if all_walls:
-        wx = [w[0] for w in all_walls]
-        wy = [w[1] for w in all_walls]
-        ax.scatter(wx, wy, c='red', s=80, marker='x', linewidths=2,
-                   label=f'Wall ({len(all_walls)} pts)', zorder=7)
-
-    if all_obstacles:
-        ox = [o[0] for o in all_obstacles]
-        oy = [o[1] for o in all_obstacles]
-        ax.scatter(ox, oy, c='orange', s=80, marker='^',
-                   label=f'Obstacle ({len(all_obstacles)} pts)', zorder=7)
-
-    # Draw the two dock walls as reference lines
-    accepted = [
-        run
-        for run in all_runs
-        if run.get('status', 'accepted') in {'accepted', 'partial'}
-    ]
-    all_x = [p[0] for run in accepted for p in run['path']] + [w[0] for w in all_walls] + [0]
-    all_y = [p[1] for run in accepted for p in run['path']] + [w[1] for w in all_walls] + [0]
-    max_x = max(all_x) * 1.05 if all_x else 1000
-    max_y = max(all_y) * 1.05 if all_y else 1000
-    ax.plot([0, max_x], [0, 0],      'k-', linewidth=2, alpha=0.5, label='Dock walls')
-    ax.plot([0, 0],     [0, max_y],  'k-', linewidth=2, alpha=0.5)
-
-    ax.set_aspect('equal')
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10)
-    ax.set_title(
-        f'Room Map — {len(accepted)} accepted / {len(all_runs)} total run(s)',
-        fontsize=14,
-    )
-    ax.set_xlabel('x (mm)')
-    ax.set_ylabel('y (mm)')
-    plt.tight_layout()
-
-    plt.savefig(img_path, dpi=150, bbox_inches='tight')
-    print(f'Map image saved → {img_path}')
-    plt.show()
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main(args=None):
@@ -1660,10 +1607,11 @@ def main(args=None):
                 strategy_map,
                 duration=options.duration,
                 conservative_exploration=not options.no_conservative_exploration,
+                territory_mm=options.territory_size,
             )
         ]
     for run in produced_runs:
-        all_runs, all_walls, all_obstacles = save_map(
+        save_map(
             deg_per_yaw,
             mm_per_wd,
             run,
@@ -1671,7 +1619,11 @@ def main(args=None):
             base_data=strategy_map if source_map_file != map_file else None,
             replace_existing=source_map_file is None,
         )
-    visualise(all_runs, all_walls, all_obstacles, img_path)
+    try:
+        from examples.mapping.visualize_cells import render_cell_map
+    except ModuleNotFoundError:
+        from visualize_cells import render_cell_map
+    render_cell_map(json.loads(map_file.read_text()), img_path)
 
 
 if __name__ == "__main__":

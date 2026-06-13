@@ -45,18 +45,7 @@ def accepted_runs(data):
     ]
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('map_file', type=Path)
-    parser.add_argument('--output', type=Path)
-    parser.add_argument(
-        '--home-route',
-        action='store_true',
-        help='overlay the route the current go-home planner would follow',
-    )
-    options = parser.parse_args()
-
-    data = json.loads(options.map_file.read_text())
+def render_cell_map(data, output, home_route=False):
     runs = accepted_runs(data)
     path_points = [
         (float(point[0]), float(point[1]))
@@ -84,6 +73,8 @@ def main():
         {},
     )
     focus = tuple(policy.get('focus_territory', (0, 0)))
+    territory_mm = float(policy.get('territory_size_mm', TERRITORY_MM))
+    grid_mm = territory_mm / GRID_CELLS
     territories = [
         tuple(territory)
         for territory in policy.get('territories', [focus])
@@ -92,7 +83,7 @@ def main():
         territories.append(focus)
     resolutions = {
         territory: territory_resolution(
-            territory, path_points, blockers, wall_segments
+            territory, path_points, blockers, wall_segments, territory_mm
         )
         for territory in territories
     }
@@ -123,8 +114,8 @@ def main():
                 )
 
     for territory, resolution in resolutions.items():
-        x0 = territory[0] * TERRITORY_MM
-        y0 = territory[1] * TERRITORY_MM
+        x0 = territory[0] * territory_mm
+        y0 = territory[1] * territory_mm
         for cell_x in range(GRID_CELLS):
             for cell_y in range(GRID_CELLS):
                 cell = (cell_x, cell_y)
@@ -134,9 +125,9 @@ def main():
                     if cell in resolution[name]
                 )
                 rectangle = patches.Rectangle(
-                    (x0 + cell_x * GRID_MM, y0 + cell_y * GRID_MM),
-                    GRID_MM,
-                    GRID_MM,
+                    (x0 + cell_x * grid_mm, y0 + cell_y * grid_mm),
+                    grid_mm,
+                    grid_mm,
                     facecolor=CELL_COLORS[status],
                     edgecolor='#111111' if territory == focus else '#555555',
                     linewidth=2.25 if territory == focus else 1.5,
@@ -145,8 +136,8 @@ def main():
                 )
                 ax.add_patch(rectangle)
                 ax.text(
-                    x0 + (cell_x + 0.5) * GRID_MM,
-                    y0 + (cell_y + 0.5) * GRID_MM,
+                    x0 + (cell_x + 0.5) * grid_mm,
+                    y0 + (cell_y + 0.5) * grid_mm,
                     f'{territory} cell {cell_x},{cell_y}\nvisited: '
                     f'{"yes" if cell in resolution["visited"] else "no"}\n{status}',
                     ha='center',
@@ -171,7 +162,7 @@ def main():
         ax.scatter(*zip(*obstacles), c='orange', s=80, marker='^',
                    label=f'Obstacle ({len(obstacles)} pts)', zorder=7)
 
-    if options.home_route:
+    if home_route:
         home_route = plan_home_route(data)
         route_x = [point[0] for point in home_route]
         route_y = [point[1] for point in home_route]
@@ -197,33 +188,49 @@ def main():
                 zorder=10,
             )
 
-    ax.plot([0, TERRITORY_MM], [0, 0], 'k-', linewidth=2, alpha=0.5,
+    ax.plot([0, territory_mm], [0, 0], 'k-', linewidth=2, alpha=0.5,
             label='Dock walls')
-    ax.plot([0, 0], [0, TERRITORY_MM], 'k-', linewidth=2, alpha=0.5)
+    ax.plot([0, 0], [0, territory_mm], 'k-', linewidth=2, alpha=0.5)
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.2)
     ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(1.01, 1))
     ax.set_title(
         f'Room Map with {len(territories)} Unlocked Territory Cell Grids - '
         f'Focus {focus}'
-        f'{" - Planned Go-Home Route" if options.home_route else ""}',
+        f'{" - Planned Go-Home Route" if home_route else ""}',
         fontsize=14,
     )
     ax.set_xlabel('x (mm)')
     ax.set_ylabel('y (mm)')
-    min_x = min(territory[0] * TERRITORY_MM for territory in territories)
-    max_x = max((territory[0] + 1) * TERRITORY_MM for territory in territories)
-    min_y = min(territory[1] * TERRITORY_MM for territory in territories)
-    max_y = max((territory[1] + 1) * TERRITORY_MM for territory in territories)
-    ax.set_xlim(min(-200, min_x - 200), max(TERRITORY_MM + 200, max_x + 200))
-    ax.set_ylim(min(-200, min_y - 200), max(TERRITORY_MM + 200, max_y + 200))
+    min_x = min(territory[0] * territory_mm for territory in territories)
+    max_x = max((territory[0] + 1) * territory_mm for territory in territories)
+    min_y = min(territory[1] * territory_mm for territory in territories)
+    max_y = max((territory[1] + 1) * territory_mm for territory in territories)
+    ax.set_xlim(min(-200, min_x - 200), max(territory_mm + 200, max_x + 200))
+    ax.set_ylim(min(-200, min_y - 200), max(territory_mm + 200, max_y + 200))
     plt.tight_layout()
 
+    plt.savefig(output, dpi=180, bbox_inches='tight')
+    print(f'Cell map image saved -> {output}')
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('map_file', type=Path)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument(
+        '--home-route',
+        action='store_true',
+        help='overlay the route the current go-home planner would follow',
+    )
+    options = parser.parse_args()
+
+    data = json.loads(options.map_file.read_text())
     output = options.output or options.map_file.with_name(
         f'{options.map_file.stem}_cells.png'
     )
-    plt.savefig(output, dpi=180, bbox_inches='tight')
-    print(f'Cell map image saved -> {output}')
+    render_cell_map(data, output, home_route=options.home_route)
 
 
 if __name__ == '__main__':

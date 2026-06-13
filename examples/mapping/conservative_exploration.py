@@ -24,6 +24,8 @@ WALL_SAMPLE_MM = 25
 WALL_RECOVERY_MM = 300
 MIN_USEFUL_FORWARD_MM = 200
 FRONTIER_HEADING_WEIGHT = 12000
+FRONTIER_ENTRY_BONUS = 15000
+REVISIT_PENALTY = 8000
 NO_PROGRESS_PENALTY = 1000000
 WALL_SEGMENT_PENALTY = 500000
 WALL_SEGMENT_CLEARANCE_WEIGHT = 100
@@ -33,50 +35,55 @@ def territory_cell(x, y, size=TERRITORY_MM):
     return math.floor(x / size), math.floor(y / size)
 
 
-def territory_coverage(cell, points):
+def territory_coverage(cell, points, territory_mm=TERRITORY_MM):
+    grid_mm = territory_mm / GRID_CELLS
     cx, cy = cell
-    x0 = cx * TERRITORY_MM
-    y0 = cy * TERRITORY_MM
+    x0 = cx * territory_mm
+    y0 = cy * territory_mm
     return {
         (
-            min(GRID_CELLS - 1, max(0, int((x - x0) // GRID_MM))),
-            min(GRID_CELLS - 1, max(0, int((y - y0) // GRID_MM))),
+            min(GRID_CELLS - 1, max(0, int((x - x0) // grid_mm))),
+            min(GRID_CELLS - 1, max(0, int((y - y0) // grid_mm))),
         )
         for x, y in points
-        if territory_cell(x, y) == cell
+        if territory_cell(x, y, territory_mm) == cell
     }
 
 
-def grid_cell_center(territory, cell):
+def grid_cell_center(territory, cell, territory_mm=TERRITORY_MM):
+    grid_mm = territory_mm / GRID_CELLS
     return (
-        territory[0] * TERRITORY_MM + (cell[0] + 0.5) * GRID_MM,
-        territory[1] * TERRITORY_MM + (cell[1] + 0.5) * GRID_MM,
+        territory[0] * territory_mm + (cell[0] + 0.5) * grid_mm,
+        territory[1] * territory_mm + (cell[1] + 0.5) * grid_mm,
     )
 
 
-def local_grid_cell(territory, x, y):
-    if territory_cell(x, y) != territory:
+def local_grid_cell(territory, x, y, territory_mm=TERRITORY_MM):
+    grid_mm = territory_mm / GRID_CELLS
+    if territory_cell(x, y, territory_mm) != territory:
         return None
     return (
         min(
             GRID_CELLS - 1,
-            max(0, int((x - territory[0] * TERRITORY_MM) // GRID_MM)),
+            max(0, int((x - territory[0] * territory_mm) // grid_mm)),
         ),
         min(
             GRID_CELLS - 1,
-            max(0, int((y - territory[1] * TERRITORY_MM) // GRID_MM)),
+            max(0, int((y - territory[1] * territory_mm) // grid_mm)),
         ),
     )
 
 
-def territory_resolution(cell, path_points, blockers, wall_segments=()):
+def territory_resolution(
+    cell, path_points, blockers, wall_segments=(), territory_mm=TERRITORY_MM
+):
     all_cells = {
         (x, y)
         for x in range(GRID_CELLS)
         for y in range(GRID_CELLS)
     }
-    visited = territory_coverage(cell, path_points)
-    blocked = territory_coverage(cell, blockers) - visited
+    visited = territory_coverage(cell, path_points, territory_mm)
+    blocked = territory_coverage(cell, blockers, territory_mm) - visited
     if not visited:
         return {
             'visited': set(),
@@ -91,8 +98,8 @@ def territory_resolution(cell, path_points, blockers, wall_segments=()):
         x, y = pending.pop()
         for neighbor in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
             connection = (
-                grid_cell_center(cell, (x, y)),
-                grid_cell_center(cell, neighbor),
+                grid_cell_center(cell, (x, y), territory_mm),
+                grid_cell_center(cell, neighbor, territory_mm),
             )
             if (
                 neighbor in all_cells
@@ -113,20 +120,34 @@ def territory_resolution(cell, path_points, blockers, wall_segments=()):
     }
 
 
-def territory_sufficiently_mapped(cell, path_points, blockers=(), wall_segments=()):
-    resolution = territory_resolution(cell, path_points, blockers, wall_segments)
+def territory_sufficiently_mapped(
+    cell, path_points, blockers=(), wall_segments=(), territory_mm=TERRITORY_MM
+):
+    resolution = territory_resolution(
+        cell, path_points, blockers, wall_segments, territory_mm
+    )
     return len(resolution['visited']) >= MIN_VISITED_CELLS and not resolution['frontier']
 
 
 class ConservativeExploration:
-    """Optional policy that confines exploration to unlocked 2 m territories."""
+    """Optional policy that confines exploration to unlocked square territories."""
 
     metadata_key = 'conservative_exploration'
 
-    def __init__(self, runs, start, path_points, blockers, wall_segments=None):
+    def __init__(
+        self,
+        runs,
+        start,
+        path_points,
+        blockers,
+        wall_segments=None,
+        territory_mm=TERRITORY_MM,
+    ):
         self.path_points = path_points
         self.blockers = blockers
         self.wall_segments = wall_segments if wall_segments is not None else []
+        self.territory_mm = territory_mm
+        self.grid_mm = territory_mm / GRID_CELLS
         self.territories = []
         self.focus = None
         for run in runs:
@@ -138,7 +159,7 @@ class ConservativeExploration:
             if state.get('focus_territory') is not None:
                 candidate = tuple(int(value) for value in state['focus_territory'])
                 self.focus = candidate
-        start_cell = territory_cell(*start)
+        start_cell = territory_cell(start[0], start[1], self.territory_mm)
         if not self.territories:
             self.territories.append(start_cell)
         if self.focus not in self.territories:
@@ -150,19 +171,21 @@ class ConservativeExploration:
             (cell, local_cell)
             for cell in self.territories
             for local_cell in territory_resolution(
-                cell, prior_path, prior_blockers, self.wall_segments
+                cell, prior_path, prior_blockers, self.wall_segments,
+                self.territory_mm,
             )['resolved']
         }
         self.completed_territories = {
             cell
             for cell in self.territories
             if territory_sufficiently_mapped(
-                cell, prior_path, prior_blockers, self.wall_segments
+                cell, prior_path, prior_blockers, self.wall_segments,
+                self.territory_mm,
             )
         }
 
     def allows_point(self, x, y):
-        return territory_cell(x, y) in set(self.territories)
+        return territory_cell(x, y, self.territory_mm) in set(self.territories)
 
     def forward_distance(self, x, y, heading, desired_distance):
         hr = math.radians(heading)
@@ -184,8 +207,15 @@ class ConservativeExploration:
         return int(desired_distance)
 
     def heading_preference(self, x, y, heading):
-        """Reward headings toward reachable unvisited cells with room to move."""
-        clearance = self.forward_distance(x, y, heading, TERRITORY_MM)
+        """Reward headings that drive into reachable, still-unvisited cells.
+
+        Aiming toward a frontier cell is not enough: a frontier cell behind a
+        wall keeps drawing Dash back to re-drive visited cells along that wall.
+        So we reward headings whose forward leg actually *enters* a reachable
+        unvisited cell (testing its reachability) and penalise headings that
+        only re-traverse already-visited cells.
+        """
+        clearance = self.forward_distance(x, y, heading, self.territory_mm)
         if clearance < MIN_USEFUL_FORWARD_MM:
             return -NO_PROGRESS_PENALTY + clearance
 
@@ -194,11 +224,16 @@ class ConservativeExploration:
             self.path_points,
             self.blockers,
             self.wall_segments,
+            self.territory_mm,
         )
         forbidden = resolution['blocked'] | resolution['unreachable']
+        frontier = resolution['frontier']
+        visited = resolution['visited']
         hr = math.radians(heading)
         ux, uy = math.cos(hr), math.sin(hr)
-        for distance in (GRID_MM / 2, GRID_MM, GRID_MM * 1.5):
+        enters_frontier = False
+        leaves_visited = False
+        for distance in (self.grid_mm / 2, self.grid_mm, self.grid_mm * 1.5):
             point = x + distance * ux, y + distance * uy
             if any(
                 point_segment_distance(point, wall_start, wall_end)
@@ -211,14 +246,22 @@ class ConservativeExploration:
                 )
             cell = local_grid_cell(
                 self.focus,
-                *point,
+                point[0],
+                point[1],
+                self.territory_mm,
             )
             if cell in forbidden:
                 return -NO_PROGRESS_PENALTY + clearance
+            # Only count cells the leg can actually reach this move.
+            if distance <= clearance:
+                if cell in frontier:
+                    enters_frontier = True
+                if cell is not None and cell not in visited:
+                    leaves_visited = True
 
         targets = [
-            grid_cell_center(self.focus, cell)
-            for cell in resolution['frontier']
+            grid_cell_center(self.focus, cell, self.territory_mm)
+            for cell in frontier
         ]
         if not targets:
             return clearance
@@ -228,12 +271,21 @@ class ConservativeExploration:
             for tx, ty in targets
             if math.hypot(tx - x, ty - y) > 0
         )
-        return best_alignment * FRONTIER_HEADING_WEIGHT + min(clearance, GRID_MM)
+        score = (
+            best_alignment * FRONTIER_HEADING_WEIGHT
+            + min(clearance, self.grid_mm)
+        )
+        if enters_frontier:
+            score += FRONTIER_ENTRY_BONUS
+        elif not leaves_visited:
+            score -= REVISIT_PENALTY
+        return score
 
     def report_progress(self):
         for cell in self.territories:
             resolution = territory_resolution(
-                cell, self.path_points, self.blockers, self.wall_segments
+                cell, self.path_points, self.blockers, self.wall_segments,
+                self.territory_mm,
             )
             for local_cell in sorted(resolution['resolved']):
                 key = (cell, local_cell)
@@ -250,7 +302,8 @@ class ConservativeExploration:
             if (
                 cell not in self.completed_territories
                 and territory_sufficiently_mapped(
-                    cell, self.path_points, self.blockers, self.wall_segments
+                    cell, self.path_points, self.blockers, self.wall_segments,
+                    self.territory_mm,
                 )
             ):
                 print(
@@ -264,7 +317,8 @@ class ConservativeExploration:
 
     def unlock_if_complete(self):
         if not territory_sufficiently_mapped(
-            self.focus, self.path_points, self.blockers, self.wall_segments
+            self.focus, self.path_points, self.blockers, self.wall_segments,
+            self.territory_mm,
         ):
             return
         adjacent_unfinished = [
@@ -274,14 +328,17 @@ class ConservativeExploration:
                 cell != self.focus
                 and abs(cell[0] - self.focus[0]) + abs(cell[1] - self.focus[1]) == 1
                 and not territory_sufficiently_mapped(
-                    cell, self.path_points, self.blockers, self.wall_segments
+                    cell, self.path_points, self.blockers, self.wall_segments,
+                    self.territory_mm,
                 )
             )
         ]
         if adjacent_unfinished:
             self.focus = max(
                 adjacent_unfinished,
-                key=lambda cell: len(territory_coverage(cell, self.path_points)),
+                key=lambda cell: len(
+                    territory_coverage(cell, self.path_points, self.territory_mm)
+                ),
             )
             print(
                 f'\n  [adjacent territory selected] moving exploration '
@@ -304,8 +361,8 @@ class ConservativeExploration:
         next_territory = min(
             candidates,
             key=lambda cell: (
-                -len(territory_coverage(cell, self.path_points)),
-                len(territory_coverage(cell, self.blockers)),
+                -len(territory_coverage(cell, self.path_points, self.territory_mm)),
+                len(territory_coverage(cell, self.blockers, self.territory_mm)),
                 cell[0] ** 2 + cell[1] ** 2,
             ),
         )
@@ -319,19 +376,22 @@ class ConservativeExploration:
     def describe(self):
         return (
             f"  Conservative territory {self.focus}: "
-            f"{TERRITORY_MM}mm square, {len(self.territories)} unlocked."
+            f"{self.territory_mm}mm square, {len(self.territories)} unlocked."
         )
 
     def metadata(self):
         resolution = territory_resolution(
-            self.focus, self.path_points, self.blockers, self.wall_segments
+            self.focus, self.path_points, self.blockers, self.wall_segments,
+            self.territory_mm,
         )
         return {
-            'territory_size_mm': TERRITORY_MM,
+            'territory_size_mm': self.territory_mm,
             'territories': self.territories,
             'focus_territory': self.focus,
             'focus_resolution': {
                 key: len(value) for key, value in resolution.items()
             },
-            'focus_coverage_cells': len(territory_coverage(self.focus, self.path_points)),
+            'focus_coverage_cells': len(
+                territory_coverage(self.focus, self.path_points, self.territory_mm)
+            ),
         }

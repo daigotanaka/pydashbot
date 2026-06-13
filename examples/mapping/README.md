@@ -80,12 +80,26 @@ uv run --extra tools examples/mapping/map_room.py \
   --duration 300
 ```
 
+By default the mapper explores with the conservative-territory policy (see
+[Conservative Exploration](#conservative-exploration)): it confines itself to an
+unlocked square territory and repeatedly picks a forward heading that drives
+*into* a reachable, still-unvisited cell to test whether it is reachable, rather
+than re-driving cells it has already visited. Each leg stops early on a wall, a
+tilt, or a territory boundary; odometry is validated after every command and
+loop-closure corrections against known landmarks bound the drift. As cells are
+resolved the policy unlocks adjacent territory so the explored region grows
+compactly. Pass `--no-conservative-exploration` for undirected forward legs, or
+`--territory-size MM` to change the territory granularity.
+
 `--duration` is measured in seconds and defaults to 60. A fresh run with
 `--output` replaces an existing file at that path. Without `--output`, the
 mapper creates a timestamped file such as
 `room_map_20260612-17-23-26.json`.
 
-The mapper also renders a PNG beside the JSON using the same basename.
+The mapper renders a PNG beside the JSON using the same basename: a cell-grid
+overlay showing the conservative-exploration territories with each cell's
+visited / blocked / unreachable / frontier state, the robot path, and the wall
+observations.
 
 After exploration, do not manually move Dash before running `--go-home`.
 
@@ -289,30 +303,16 @@ list in the room-map JSON.
 
 ### Next Challenge: Blocked Edges Over-Block Parallel Proven Corridors
 
-A blocked edge can remove a *different*, already-driven corridor from the plan,
-producing a false "no unblocked route home" even when a proven path exists.
-`edge_is_blocked` excludes any graph edge whose midpoint falls within
+A blocked edge can still remove a *different*, already-driven corridor from the
+plan, producing a false "no unblocked route home" even when a proven path
+exists. `edge_is_blocked` excludes any graph edge whose midpoint falls within
 `BLOCKED_EDGE_TOLERANCE_MM` of the blocked segment and runs roughly parallel to
-it. A long proven corridor that runs alongside the blocked segment — especially
-one that shares an endpoint with it — gets caught and excluded.
-
-Recorded example (from a captured run): exploration drove the proven corridor
-`(80,80) -> (738,69)` out from the dock. A later go-home stopped on an obstacle
-and recorded the blocked edge `(532,25) -> (738,69)`. The proven corridor's
-midpoint `(409,74)` lies 133 mm from that blocked segment (under the 150 mm
-tolerance) and runs nearly parallel, sharing the `(738,69)` endpoint, so
-`edge_is_blocked` returned `True` for the corridor Dash had just driven. With its
-only proven path home removed, go-home reported no route. (Note the obstacle was
-only ~23 mm off the proven corridor, so the corridor's clearance is genuinely
-ambiguous — but Dash had traversed it minutes earlier, so the planner should at
-least try it rather than delete it.)
-
-Partially addressed: `edge_is_blocked` now requires the candidate edge's
-midpoint to project onto the *interior* of the blocked segment, so an edge that
-merely shares an endpoint with the blocked segment, or runs past its far end, is
-no longer excluded (the endpoint-sharing guard). On the recorded example above,
-`plan_home_route` now returns a route home through the previously over-blocked
-corridor instead of reporting no route.
+it. The endpoint-sharing case is already guarded: a candidate edge is excluded
+only when its midpoint projects onto the *interior* of the blocked segment, so a
+corridor that merely shares an endpoint with it, or runs past its far end,
+survives. What remains is collinear bleed — a genuinely parallel corridor that
+overlaps the blocked segment's interior is still excluded even though Dash
+already drove it.
 
 Remaining directions:
 
@@ -339,9 +339,13 @@ and `plan_home_route` in `examples/mapping/map_room.py`; the per-run
 
 ### Conservative Exploration
 
-The mapper limits exploration to an initial 2 x 2 meter territory. When a
-forward leg approaches the edge of an unlocked territory, it stops short and
-chooses a new direction as though it had reached a mental wall.
+The mapper limits exploration to an initial square territory (2 x 2 meters by
+default; change the side length with `--territory-size MM`). When a forward leg
+approaches the edge of an unlocked territory, it stops short and chooses a new
+direction as though it had reached a mental wall. Smaller territories unlock
+sooner and resolve walled-off cells at finer granularity, because each cell is
+`territory-size / 4` on a side and wall observations are then less likely to
+fall in the same cell Dash drove through.
 
 Mental walls are planning constraints only. They are stored as
 `conservative_exploration` territory metadata on each run and are never added
@@ -356,10 +360,15 @@ cells and no reachable unresolved frontier remains. This lets a physically
 small or enclosed area complete even when most of its 16 cells are unreachable,
 without treating mental walls as physical evidence.
 
-Heading selection strongly prefers reachable, unvisited frontier-cell centers.
-It rejects directions with less than 200 mm of usable forward clearance and
-directions leading into cells classified as physically blocked or unreachable.
-This prevents repeated turn-only loops near a mental boundary.
+Heading selection strongly prefers headings whose forward leg actually *enters*
+a reachable, unvisited frontier cell, so Dash tests a cell's reachability
+instead of merely aiming at frontier it cannot reach. A heading that only
+re-traverses already-visited cells is penalized. (Aiming toward a frontier cell
+behind a wall is not enough on its own: it draws Dash back to re-drive the
+visited cells along that wall, re-detecting known walls instead of making
+progress.) It still rejects directions with less than 200 mm of usable forward
+clearance and directions leading into cells classified as physically blocked or
+unreachable. This prevents repeated turn-only loops near a mental boundary.
 
 Real wall observations within 300 mm of each other are treated as a continuous
 wall segment by the core exploration planner, including when conservative
