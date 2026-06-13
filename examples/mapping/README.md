@@ -175,6 +175,37 @@ Wheel odometry measures wheel rotation, not physical movement. If Dash is
 blocked while its wheels spin, the saved pose can become inaccurate. Stop the
 run and avoid go-home if this happens.
 
+## Next Challenge: Blocked Go-Home Routes
+
+Go-home currently plans the shortest route along previously traversed path
+segments and safely aborts when a movement leg stops early. The aborted run
+preserves a trustworthy final pose when no odometry update was rejected, so a
+later go-home attempt can replan from Dash's current position.
+
+However, the planner does not yet remember which route segment caused an early
+stop. A subsequent attempt may select the same blocked corridor again,
+retreating and retrying without making progress.
+
+The next implementation should:
+
+1. Record a failed go-home segment as a temporarily blocked graph edge,
+   including its endpoints, timestamp, and observed stop position.
+2. Preserve blocked-edge data in the map JSON across safely aborted go-home
+   runs.
+3. Exclude blocked edges when planning the next shortest proven route home.
+4. Report clearly when no known-safe route home remains.
+5. Optionally perform bounded local exploration to discover a new connection,
+   while always preserving a proven retreat route.
+
+Safety constraints:
+
+- Never infer an arbitrary shortcut through unknown space.
+- Keep obstacle-aware movement enabled.
+- Abort on rejected odometry or an early stop.
+- Only continue from a partial go-home run when its final pose remains
+  trustworthy.
+- Avoid repeatedly commanding motion into the same blocked segment.
+
 ## Command Reference
 
 Show all mapper options:
