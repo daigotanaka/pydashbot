@@ -330,6 +330,54 @@ Relevant code: `edge_is_blocked`, `_point_near_segment`, `collect_blocked_edges`
 and `plan_home_route` in `examples/mapping/map_room.py`; the per-run
 `blocked_edges` records in the room-map JSON.
 
+### Next Challenge: A Better Retry Planner
+
+The current retry loop excludes the exact blocked edge, replans the shortest
+proven route, and repeats. In testing this over-blocked parallel corridors,
+gave up too early, and produced routes full of stall-prone small turns. A manual
+drive home from the same stuck pose succeeded by doing almost the opposite:
+backing into open space, committing to one long straight run, and re-referencing
+to a wall. The outline below captures that experience as a target algorithm.
+
+1. **Retreat to maneuver room before replanning.** When a leg stops blocked,
+   reverse a bounded distance into space just traversed (known clear) before
+   planning the next attempt. Manual control needed roughly 300 mm of clearance
+   before Dash could turn at all; planning a turn while wedged against the wall
+   only stalls.
+2. **Soft costs, not hard exclusions.** Do not delete the blocked corridor from
+   the graph. Keep edges Dash actually drove during exploration as a trusted
+   graph, and raise the cost of the specific blocked approach (a small zone
+   around the stop position) so the planner prefers alternatives but can still
+   fall back to a proven corridor as a last resort. Never let a blocked segment
+   exclude a parallel or endpoint-sharing proven corridor (see the over-blocking
+   challenge above).
+3. **Prefer few long straight legs over many short ones.** The manual success
+   came from one long straight drive (a 600 mm leg that completed in full) down a
+   clear line, not from nibbling forward. Favor routes with long, wall-parallel
+   straight segments and the fewest turns, since each turn from rest is a failure
+   risk.
+4. **Make turns reliable.** Small turns (~15-35 degrees) stalled from rest in
+   testing, while large turns executed. Snap heading changes to a minimum
+   effective turn, or add a brief kick or wiggle to break static friction, and
+   verify rotation with the closed-loop turn outcome, compensating for the
+   under-rotation that was also observed (a 40-degree command yielding ~11
+   degrees).
+5. **Re-reference to walls to bound drift.** Pure dead reckoning over ~10 moves
+   drifted to a 165-675 mm position uncertainty. Periodically, and at the end,
+   re-reference against a known wall (the rear-wall docking move, or a side wall)
+   to reset accumulated error instead of trusting odometry.
+6. **Generous near-home acceptance, then fine-tune.** Manual driving reached
+   about 200 mm from the dock with only a final orientation tweak needed. Once
+   within a near-home band, hand off to the existing crawl plus rear-reference
+   final approach and a closing orientation correction.
+7. **Bound and report.** Cap the retries, report the halt reason and the chosen
+   alternative each time, and when only an over-blocked proven corridor remains,
+   try it at reduced confidence rather than declaring no route.
+
+Relevant code: `go_home_with_retries`, `go_home`, `plan_home_route`,
+`edge_is_blocked`, and the final-approach helpers (`crawl_home`,
+`rear_reference`) in `examples/mapping/map_room.py`.
+
 ### Next Challenge: Detecting Wheel Slip
 
 Wheel odometry measures wheel *rotation*, not physical movement. On a low bump,
