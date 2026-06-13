@@ -233,6 +233,18 @@ class MappingStrategyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no unblocked proven route"):
             map_room.plan_home_route(data)
 
+    def test_wall_clearance_only_after_large_turn_into_a_wall(self):
+        threshold = map_room.PROX_THRESHOLD
+        # Near-reversal turn facing a wall just left -> nudge to clear it.
+        self.assertTrue(map_room.needs_wall_clearance(180, 0, threshold))
+        self.assertTrue(map_room.needs_wall_clearance(-150, threshold + 5, 0))
+        # A large turn but a clear front does not qualify.
+        self.assertFalse(map_room.needs_wall_clearance(180, 0, threshold - 1))
+        # A small heading change never triggers a clearance nudge.
+        self.assertFalse(map_room.needs_wall_clearance(30, threshold, threshold))
+        # Missing readings are treated as clear.
+        self.assertFalse(map_room.needs_wall_clearance(180, None, None))
+
     def test_go_home_returns_to_initial_pose_and_heading(self):
         data = {
             "runs": [

@@ -57,6 +57,9 @@ HOME_ROUTE_COLLINEAR_DEG = 12
 HOME_MAX_LEG_MM = 1000
 HOME_POSITION_TOLERANCE_MM = 100
 BLOCKED_EDGE_TOLERANCE_MM = 150
+HOME_WALL_CLEARANCE_MM = 120        # short nudge to step off a wall just turned from
+HOME_CLEARANCE_SPEED_MMPS = 80
+HOME_CLEARANCE_MIN_TURN_DEG = 120   # only a near-reversal turn faces a wall left behind
 MAX_TRACKED_TURN_DEG = 90
 MIN_TRACKED_TURN_DEG = 20
 HOME_CLEAR_RETRY_DELAY = 0.3
@@ -716,6 +719,20 @@ def describe_halt(outcome, deg_per_yaw=None):
     return str(outcome)
 
 
+def needs_wall_clearance(leg_turn_deg, prox_left, prox_right, threshold=PROX_THRESHOLD):
+    """Whether a leg should begin with a clearance nudge off a wall just left.
+
+    A near-reversal turn at the start of a go-home leg puts a wall that sat
+    behind Dash during outbound travel directly ahead, where the forward
+    proximity sensors read it even though Dash just traversed that space. In that
+    case a short, bounded forward nudge lets Dash step off the known wall before
+    normal obstacle stopping resumes. A smaller turn, or a clear front, does not
+    qualify, so genuine head-on obstacles still stop the robot.
+    """
+    front = max(prox_left or 0, prox_right or 0)
+    return abs(leg_turn_deg) >= HOME_CLEARANCE_MIN_TURN_DEG and front >= threshold
+
+
 def go_home(data, deg_per_yaw, mm_per_wd):
     """Follow the shortest known-safe route back to the map's initial pose."""
     route = plan_home_route(data)
@@ -802,11 +819,39 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     try:
         prev_waypoint = route[0]
         for waypoint_x, waypoint_y in route[1:]:
+            leg_first_move = True
             while math.hypot(waypoint_x - x, waypoint_y - y) > HOME_POSITION_TOLERANCE_MM:
                 target_heading = math.degrees(math.atan2(waypoint_y - y, waypoint_x - x))
+                intended_turn = angle_delta(target_heading, heading)
                 if not turn_to(target_heading):
                     completed = False
                     break
+                if leg_first_move:
+                    leg_first_move = False
+                    prox_left = send_command('get_prox_left')['result']
+                    prox_right = send_command('get_prox_right')['result']
+                    if needs_wall_clearance(intended_turn, prox_left, prox_right):
+                        clearance = min(
+                            HOME_WALL_CLEARANCE_MM,
+                            home_leg_distance(
+                                math.hypot(waypoint_x - x, waypoint_y - y)
+                            ),
+                        )
+                        print(
+                            f"\n  Stepping off wall just turned from "
+                            f"(prox L={prox_left} R={prox_right}); "
+                            f"nudging {clearance:.0f}mm with detection off"
+                        )
+                        clearance_response = send_command(
+                            'move',
+                            clearance,
+                            HOME_CLEARANCE_SPEED_MMPS,
+                            stop_at_obstacle=False,
+                            wall_stop_sound=None,
+                        )
+                        if clearance_response.get('ok', True) is not False:
+                            update_pose('forward', clearance)
+                        continue
                 requested = home_leg_distance(
                     math.hypot(waypoint_x - x, waypoint_y - y)
                 )
