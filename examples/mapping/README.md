@@ -286,6 +286,50 @@ Relevant code: `go_home` (the move loop, `needs_wall_clearance`,
 `PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
 list in the room-map JSON.
 
+### Next Challenge: Blocked Edges Over-Block Parallel Proven Corridors
+
+A blocked edge can remove a *different*, already-driven corridor from the plan,
+producing a false "no unblocked route home" even when a proven path exists.
+`edge_is_blocked` excludes any graph edge whose midpoint falls within
+`BLOCKED_EDGE_TOLERANCE_MM` of the blocked segment and runs roughly parallel to
+it. A long proven corridor that runs alongside the blocked segment — especially
+one that shares an endpoint with it — gets caught and excluded.
+
+Recorded example (from a captured run): exploration drove the proven corridor
+`(80,80) -> (738,69)` out from the dock. A later go-home stopped on an obstacle
+and recorded the blocked edge `(532,25) -> (738,69)`. The proven corridor's
+midpoint `(409,74)` lies 133 mm from that blocked segment (under the 150 mm
+tolerance) and runs nearly parallel, sharing the `(738,69)` endpoint, so
+`edge_is_blocked` returned `True` for the corridor Dash had just driven. With its
+only proven path home removed, go-home reported no route. (Note the obstacle was
+only ~23 mm off the proven corridor, so the corridor's clearance is genuinely
+ambiguous — but Dash had traversed it minutes earlier, so the planner should at
+least try it rather than delete it.)
+
+Possible directions:
+
+1. **Tighten the blocked region.** Block a small zone around the actual stop
+   position rather than the whole route leg, reducing collinear bleed onto
+   neighboring corridors.
+2. **Never hard-exclude proven-driven edges.** Distinguish edges Dash actually
+   drove (exploration path segments) from inferred proximity links. Downweight a
+   proven-driven corridor that overlaps a blockage so it becomes a last resort,
+   instead of removing it — "we already drove this" is the strongest evidence of
+   passability.
+3. **Endpoint-sharing guard.** Do not exclude an edge that merely shares an
+   endpoint with the blocked segment and extends away from it.
+
+Safety constraints:
+
+- Still avoid re-driving the same blocked approach that failed.
+- Prefer trying a proven corridor at reduced confidence over falsely reporting no
+  route, but keep obstacle-aware movement enabled so a genuine obstruction still
+  stops Dash.
+
+Relevant code: `edge_is_blocked`, `_point_near_segment`, `collect_blocked_edges`,
+and `plan_home_route` in `examples/mapping/map_room.py`; the per-run
+`blocked_edges` records in the room-map JSON.
+
 ### Next Challenge: Detecting Wheel Slip
 
 Wheel odometry measures wheel *rotation*, not physical movement. On a low bump,
