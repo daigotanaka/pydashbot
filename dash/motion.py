@@ -15,18 +15,68 @@ MAX_REVERSE_OBSTACLE_AWARE_SPEED_MMPS = 100
 TILT_STOP_THRESHOLD = 40
 TILT_CONFIRM_COUNT = 15
 
+# Closed-loop turn verification. After commanding a turn we read the gyro and
+# wheel encoders to report *why* a turn did or did not take effect, instead of
+# returning silently. Thresholds are in raw sensor counts.
+TURN_SETTLE_SECONDS = 0.05
+TURN_STALL_WHEEL_COUNTS = 20   # below this, wheels effectively did not move
+TURN_STALL_YAW_COUNTS = 12     # below this, the gyro registered no rotation
+
+
+def wrap_signed_delta(previous, current, bits):
+    """Signed change of a counter that wraps at ``2 ** bits``."""
+    if previous is None or current is None:
+        return None
+    span = 1 << bits
+    delta = (current - previous) % span
+    if delta >= span // 2:
+        delta -= span
+    return delta
+
 
 class MotionController:
     """High-level bounded motion policy for a Dash-compatible actuator."""
 
     async def turn(self, degrees, speed_dps=85.9):
-        """Turn a bounded number of degrees and then stop."""
+        """Turn a bounded number of degrees, then stop and report the outcome.
+
+        Returns a dict describing whether the turn took effect, distinguishing a
+        mechanical stall (wheels did not move) from a gyro that registered no
+        rotation. ``yaw_delta`` and the wheel deltas are raw sensor counts; the
+        caller converts them to degrees with its own calibration.
+        """
         if abs(degrees) > 360:
-            return
+            return {"halt": "invalid", "commanded_deg": degrees}
+        yaw_before = self.get_yaw()
+        left_before = self.get_left_wheel()
+        right_before = self.get_right_wheel()
         seconds = abs(degrees) / speed_dps
         await self.command("move", encode_move(0, degrees, seconds))
         await asyncio.sleep(seconds)
         await self.stop()
+        await asyncio.sleep(TURN_SETTLE_SECONDS)
+        yaw_delta = wrap_signed_delta(yaw_before, self.get_yaw(), 12)
+        left_delta = wrap_signed_delta(left_before, self.get_left_wheel(), 16)
+        right_delta = wrap_signed_delta(right_before, self.get_right_wheel(), 16)
+        return self._turn_outcome(degrees, yaw_delta, left_delta, right_delta)
+
+    @staticmethod
+    def _turn_outcome(degrees, yaw_delta, left_delta, right_delta):
+        wheels_moved = max(abs(left_delta or 0), abs(right_delta or 0))
+        yaw_moved = abs(yaw_delta or 0)
+        if wheels_moved < TURN_STALL_WHEEL_COUNTS and yaw_moved < TURN_STALL_YAW_COUNTS:
+            reason = "stalled"           # wheels did not move (mechanical/surface)
+        elif yaw_moved < TURN_STALL_YAW_COUNTS:
+            reason = "no_yaw_response"   # wheels moved but the gyro saw no rotation
+        else:
+            reason = "executed"          # the turn took effect; caller checks size
+        return {
+            "halt": reason,
+            "commanded_deg": degrees,
+            "yaw_delta": yaw_delta,
+            "left_wheel_delta": left_delta,
+            "right_wheel_delta": right_delta,
+        }
 
     async def move(
         self,
@@ -50,11 +100,13 @@ class MotionController:
                 speed_mmps = min(speed_mmps, MAX_REVERSE_OBSTACLE_AWARE_SPEED_MMPS)
         seconds = abs(distance_mm / speed_mmps)
 
-        if stop_at_obstacle and distance_mm >= 0 and self._obstacle_in_path(
-            distance_mm, proximity_threshold, rear_proximity_threshold
-        ):
-            await self._stop_for_obstacle(wall_stop_sound)
-            return
+        if stop_at_obstacle and distance_mm >= 0:
+            detected, readings = self._obstacle_in_path(
+                distance_mm, proximity_threshold, rear_proximity_threshold
+            )
+            if detected:
+                await self._stop_for_obstacle(wall_stop_sound)
+                return self._obstacle_outcome("before_start", readings)
 
         baseline_pitch = self.get_pitch() if stop_at_obstacle else None
         last_proximity_time = self.get_dash_time() if stop_at_obstacle else None
@@ -68,20 +120,20 @@ class MotionController:
         logging.debug("Moving for %s seconds", seconds)
         if not stop_at_obstacle:
             await asyncio.sleep(seconds)
-            return
+            return {"halt": "completed", "monitored": False}
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + seconds
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return
+                return {"halt": "completed", "monitored": True}
             await asyncio.sleep(min(PROXIMITY_POLL_INTERVAL, remaining))
 
             proximity_time = self.get_dash_time()
             if proximity_time is None or proximity_time != last_proximity_time:
                 last_proximity_time = proximity_time
-                obstacle_detected = self._obstacle_in_path(
+                obstacle_detected, readings = self._obstacle_in_path(
                     distance_mm, proximity_threshold, rear_proximity_threshold
                 )
                 if distance_mm < 0:
@@ -90,14 +142,14 @@ class MotionController:
                     )
                     if rear_proximity_streak >= rear_proximity_confirm_count:
                         await self._stop_for_obstacle(wall_stop_sound)
-                        return
+                        return self._obstacle_outcome("moving", readings)
                 else:
                     proximity_streak = (
                         proximity_streak + 1 if obstacle_detected else 0
                     )
                     if proximity_streak >= proximity_confirm_count:
                         await self._stop_for_obstacle(wall_stop_sound)
-                        return
+                        return self._obstacle_outcome("moving", readings)
 
             tilt_time = self.get_time()
             if tilt_time is None or tilt_time != last_tilt_time:
@@ -111,7 +163,13 @@ class MotionController:
                     tilt_streak += 1
                     if tilt_streak >= tilt_confirm_count:
                         await self._stop_for_obstacle(wall_stop_sound)
-                        return
+                        return {
+                            "halt": "tilt",
+                            "phase": "moving",
+                            "pitch": pitch,
+                            "baseline_pitch": baseline_pitch,
+                            "pitch_delta": pitch - baseline_pitch,
+                        }
                 else:
                     tilt_streak = 0
 
@@ -120,20 +178,31 @@ class MotionController:
         if wall_stop_sound:
             await self.say(wall_stop_sound)
 
+    @staticmethod
+    def _obstacle_outcome(phase, readings):
+        """Build an obstacle halt outcome from the readings that triggered it."""
+        return {"halt": "obstacle", "phase": phase, **readings}
+
     def _obstacle_in_path(
         self, distance_mm, proximity_threshold, rear_proximity_threshold
     ):
+        """Return (detected, readings) where readings names the sensors used.
+
+        The readings are returned so a halt can report the exact values that
+        triggered it without issuing a second sensor read.
+        """
         if distance_mm < 0:
-            readings = (self.get_prox_rear(),)
-            threshold = rear_proximity_threshold
-        elif distance_mm > 0:
-            readings = (self.get_prox_left(), self.get_prox_right())
-            threshold = proximity_threshold
-        else:
-            return False
-        return any(
-            reading is not None and reading >= threshold
-            for reading in readings
-        )
+            rear = self.get_prox_rear()
+            detected = rear is not None and rear >= rear_proximity_threshold
+            return detected, {"side": "rear", "prox_rear": rear}
+        if distance_mm > 0:
+            left = self.get_prox_left()
+            right = self.get_prox_right()
+            detected = any(
+                reading is not None and reading >= proximity_threshold
+                for reading in (left, right)
+            )
+            return detected, {"side": "front", "prox_left": left, "prox_right": right}
+        return False, {"side": "none"}
 
     _get_move_byte_array = staticmethod(encode_move)

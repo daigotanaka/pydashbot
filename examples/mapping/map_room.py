@@ -669,6 +669,53 @@ def dock_to_corner(deg_per_yaw, mm_per_wd):
     return x0, y0
 
 
+def describe_halt(outcome, deg_per_yaw=None):
+    """Render the motion layer's halt outcome as a human-readable reason.
+
+    The motion layer returns a dict describing why a move or turn stopped (an
+    obstacle with its sensor readings, a tilt, a mechanical stall, or a gyro
+    that registered no rotation). This turns that into a one-line explanation,
+    converting raw yaw counts to degrees when a calibration scale is supplied.
+    """
+    if not isinstance(outcome, dict):
+        return 'reason not reported'
+    halt = outcome.get('halt')
+    if halt == 'obstacle' and outcome.get('side') == 'front':
+        return (
+            f"obstacle ahead (prox L={outcome.get('prox_left')} "
+            f"R={outcome.get('prox_right')}, threshold {PROX_THRESHOLD})"
+        )
+    if halt == 'obstacle' and outcome.get('side') == 'rear':
+        return f"obstacle behind (prox_rear={outcome.get('prox_rear')})"
+    if halt == 'tilt':
+        return f"tilt detected (pitch change {outcome.get('pitch_delta')})"
+    if halt in ('stalled', 'no_yaw_response', 'executed'):
+        yaw = outcome.get('yaw_delta')
+        measured = (
+            f", ~{yaw * deg_per_yaw:.0f}° measured"
+            if deg_per_yaw and yaw is not None
+            else ""
+        )
+        wheels = (
+            f"wheels L={outcome.get('left_wheel_delta')} "
+            f"R={outcome.get('right_wheel_delta')} ticks, yaw={yaw} counts{measured}"
+        )
+        commanded = outcome.get('commanded_deg')
+        if halt == 'stalled':
+            return f"wheels did not move — mechanical stall (commanded {commanded}°; {wheels})"
+        if halt == 'no_yaw_response':
+            return (
+                f"wheels moved but gyro registered no rotation "
+                f"(commanded {commanded}°; {wheels})"
+            )
+        return f"turn under target (commanded {commanded}°; {wheels})"
+    if halt == 'completed':
+        return 'completed full distance'
+    if halt == 'invalid':
+        return f"invalid command ({outcome.get('commanded_deg')}°)"
+    return str(outcome)
+
+
 def go_home(data, deg_per_yaw, mm_per_wd):
     """Follow the shortest known-safe route back to the map's initial pose."""
     route = plan_home_route(data)
@@ -683,6 +730,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
     events = []
     issues = []
     blocked_edges = []
+    halt_reason = None
     odometry_rejected = False
 
     def update_pose(action, requested):
@@ -726,16 +774,19 @@ def go_home(data, deg_per_yaw, mm_per_wd):
         return None if event_issues else distance_mm
 
     def turn_to(target_heading):
+        nonlocal halt_reason
         turn = angle_delta(target_heading, heading)
         if abs(turn) < MIN_TRACKED_TURN_DEG:
             return True
         for step in tracked_turn_steps(turn):
-            send_command('turn', step)
+            outcome = send_command('turn', step).get('result')
             previous_heading = heading
             if update_pose('turn', step) is None:
                 return False
             if abs(angle_delta(heading, previous_heading)) < abs(step) * 0.5:
                 issues.append('go-home turn did not execute')
+                halt_reason = outcome
+                print(f"\n  Turn did not execute — {describe_halt(outcome, deg_per_yaw)}")
                 return False
         return True
 
@@ -769,6 +820,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                     issues.append(f"go-home move command failed: {response['error']}")
                     completed = False
                     break
+                move_outcome = response.get('result')
                 traveled = update_pose('forward', requested)
                 if traveled is not None and abs(traveled) < 1:
                     time.sleep(HOME_CLEAR_RETRY_DELAY)
@@ -787,14 +839,20 @@ def go_home(data, deg_per_yaw, mm_per_wd):
                             )
                             completed = False
                             break
+                        move_outcome = response.get('result')
                         traveled = update_pose('forward', requested)
                 if traveled is None or traveled < requested * 0.8:
                     issues.append('go-home leg stopped early')
+                    halt_reason = move_outcome
+                    print(
+                        f"\n  Leg stopped early — {describe_halt(move_outcome, deg_per_yaw)}"
+                    )
                     if traveled is not None:
                         blocked_edges.append({
                             'from': [float(prev_waypoint[0]), float(prev_waypoint[1])],
                             'to': [float(waypoint_x), float(waypoint_y)],
                             'stop': [round(x, 1), round(y, 1)],
+                            'reason': move_outcome,
                             'timestamp': datetime.now().isoformat(timespec='seconds'),
                         })
                     completed = False
@@ -826,6 +884,8 @@ def go_home(data, deg_per_yaw, mm_per_wd):
         f"\nGo-home {'complete' if completed else 'aborted'} at "
         f"({x:.0f}, {y:.0f}) mm, heading {heading:.1f}°"
     )
+    if not completed and halt_reason is not None:
+        print(f"  Halt reason: {describe_halt(halt_reason, deg_per_yaw)}")
     return {
         'timestamp': datetime.now().isoformat(timespec='seconds'),
         'mode': 'go_home',
@@ -835,6 +895,7 @@ def go_home(data, deg_per_yaw, mm_per_wd):
             'rejected_updates': sum(not event['accepted'] for event in events),
             'tracking_lost': odometry_rejected,
             'issues': issues,
+            'halt_reason': halt_reason,
         },
         'planned_route': route,
         'path': path,

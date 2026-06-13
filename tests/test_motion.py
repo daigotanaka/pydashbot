@@ -11,23 +11,27 @@ def decode_turn_centiradians(packet):
 
 
 class TurnTests(unittest.IsolatedAsyncioTestCase):
-    async def test_left_and_right_turns_use_equal_angle_and_duration(self):
+    def make_robot(self, yaw=(0, 0), left=(0, 0), right=(0, 0)):
         robot = DashRobot.__new__(DashRobot)
         robot.command = AsyncMock()
         robot.stop = AsyncMock()
         robot.say = AsyncMock()
+        robot.get_yaw = lambda values=iter(yaw): next(values)
+        robot.get_left_wheel = lambda values=iter(left): next(values)
+        robot.get_right_wheel = lambda values=iter(right): next(values)
+        return robot
 
+    async def test_left_and_right_turns_use_equal_angle_and_duration(self):
         with patch("dash.motion.asyncio.sleep", new=AsyncMock()) as sleep:
+            robot = self.make_robot()
             await robot.turn(90)
             left_packet = robot.command.await_args.args[1]
-            left_duration = sleep.await_args.args[0]
+            left_duration = sleep.await_args_list[0].args[0]
 
-            robot.command.reset_mock()
-            sleep.reset_mock()
-
+            robot = self.make_robot()
             await robot.turn(-90)
             right_packet = robot.command.await_args.args[1]
-            right_duration = sleep.await_args.args[0]
+            right_duration = sleep.await_args_list[-2].args[0]
 
         self.assertEqual(left_duration, right_duration)
         self.assertEqual(
@@ -37,6 +41,25 @@ class TurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(left_packet[3:5], right_packet[3:5])
         self.assertEqual(left_packet[6], 0x00)
         self.assertEqual(right_packet[6], 0xC0)
+
+    async def test_turn_reports_executed_when_gyro_and_wheels_move(self):
+        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
+            robot = self.make_robot(yaw=(0, 300), left=(0, 90), right=(0, -90))
+            outcome = await robot.turn(21)
+        self.assertEqual(outcome["halt"], "executed")
+        self.assertEqual(outcome["yaw_delta"], 300)
+
+    async def test_turn_reports_stall_when_wheels_do_not_move(self):
+        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
+            robot = self.make_robot(yaw=(0, 1), left=(0, 2), right=(0, -1))
+            outcome = await robot.turn(21)
+        self.assertEqual(outcome["halt"], "stalled")
+
+    async def test_turn_reports_no_yaw_response_when_only_wheels_move(self):
+        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
+            robot = self.make_robot(yaw=(0, 2), left=(0, 90), right=(0, -90))
+            outcome = await robot.turn(21)
+        self.assertEqual(outcome["halt"], "no_yaw_response")
 
 
 class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
@@ -63,6 +86,24 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         robot.command.assert_not_awaited()
         robot.stop.assert_awaited_once()
         robot.say.assert_awaited_once_with("confused8")
+
+    async def test_move_reports_obstacle_outcome_with_sensor_readings(self):
+        robot = self.make_robot(left=99)
+
+        outcome = await robot.move(200)
+
+        self.assertEqual(outcome["halt"], "obstacle")
+        self.assertEqual(outcome["side"], "front")
+        self.assertEqual(outcome["prox_left"], 99)
+
+    async def test_move_reports_completed_when_path_stays_clear(self):
+        robot = self.make_robot()
+
+        with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+            get_loop.return_value.time.side_effect = [0, 2]
+            outcome = await robot.move(200)
+
+        self.assertEqual(outcome["halt"], "completed")
 
     async def test_backward_move_checks_rear_sensor(self):
         robot = self.make_robot(left=255, right=255, rear=0)
