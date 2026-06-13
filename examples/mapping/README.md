@@ -336,6 +336,21 @@ Relevant code: `edge_is_blocked`, `_point_near_segment`, `collect_blocked_edges`
 and `plan_home_route` in `examples/mapping/map_room.py`; the per-run
 `blocked_edges` records in the room-map JSON.
 
+### Next Challenge: Conservative exploration
+
+The robot should limit the area of the exploration to about 2 x 2 meters until
+it becomes aware of the geometry sufficiently.
+
+A long straight path may accumulate the odometer errors, and the robot will have
+less chance of safely return home. Home position is the reliable way of visually
+inspecting the map precision.
+
+So, the robot should change the direction of the exploration once it hits the
+**mental** wall of 2 x 2 meters.
+
+Also need to come up with the criteria of the sufficiently mapped 2 x 2 meters
+area before it can expand the exploration to the next 2 x 2 uncharted territory.
+
 ### Next Challenge: A Better Retry Planner
 
 The current retry loop excludes the exact blocked edge, replans the shortest
