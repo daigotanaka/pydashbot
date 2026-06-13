@@ -279,6 +279,61 @@ Relevant code: `go_home` (the move loop, `needs_wall_clearance`,
 `PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
 list in the room-map JSON.
 
+### Next Challenge: Detecting Wheel Slip
+
+Wheel odometry measures wheel *rotation*, not physical movement. On a low bump,
+threshold, or slick spot, the tires can keep turning while Dash makes little or
+no real progress. The encoders advance, so the pose estimate moves even though
+the robot did not — and every later pose, map observation, and go-home route is
+then built on a wrong position. Dash has no independent position sensor (no
+optical flow or external reference), which makes slip genuinely hard to detect.
+The available sensors are the two wheel encoders, the gyro (yaw), pitch and roll,
+the accelerometer, and the proximity sensors.
+
+There are two distinct cases, with different detectability:
+
+1. **Differential slip (one wheel).** One tire grips while the other slips or
+   spins free. This is detectable by cross-checking the wheels against the gyro:
+   the left/right encoder difference implies a heading change (through the track
+   width and `mm_per_wheel_tick`), which can be compared to the heading change
+   the gyro actually measured. A persistent mismatch — the wheels imply a turn
+   the gyro does not see, or vice versa — indicates a slipping wheel. This reuses
+   data the mapper already reads every step (`get_left_wheel`, `get_right_wheel`,
+   `get_yaw`). Measuring the raw left/right odometer difference, as a first cut,
+   is exactly this signal.
+2. **Common-mode slip (both wheels).** Both tires spin equally while Dash sits
+   still or is high-centered on a bump. This is the hard case: equal left and
+   right deltas with no rotation look like a perfectly valid straight move, so
+   the wheel-vs-gyro check cannot see it. Catching it needs a signal independent
+   of the wheels:
+   - **Accelerometer / pitch.** A real forward move produces acceleration
+     transients and, climbing a bump, a pitch spike. Wheels advancing with a flat
+     accelerometer (no motion) or a pitch event (stuck on a bump) is suspicious.
+     Noisy, but Dash exposes `get_acceleration` and `get_pitch`.
+   - **Proximity / landmark change.** When moving toward a known wall, the
+     expected proximity reading should change as Dash closes in. Wheels advancing
+     while a nearby landmark distance does not change suggests no real movement.
+     This only works near mapped features (it is a stricter cousin of the
+     existing loop-closure revisit correction).
+
+A practical implementation could start with the differential wheel-vs-gyro check
+(cheap, always available, catches one-wheel slip) and add an accelerometer-based
+"wheels turning but not accelerating" heuristic for the high-centered case. On
+suspected slip, stop the run, mark the segment uncertain (mirroring how
+implausible odometry is already isolated), and either re-reference against a
+known wall or require re-docking rather than trusting the drifted pose.
+
+Safety and correctness constraints:
+
+- Prefer a false stop over silently trusting a slipped pose; a corrupted pose
+  poisons all later mapping and any go-home route.
+- Keep the existing odometry validation and loop-closure corrections; slip
+  detection augments them rather than replacing them.
+
+Relevant code: `update_pose` and `validate_odometry` in
+`examples/mapping/map_room.py`; the `get_left_wheel`, `get_right_wheel`,
+`get_yaw`, `get_pitch`, and `get_acceleration` sensors in `dash/sensors.py`.
+
 ## Command Reference
 
 Show all mapper options:
