@@ -330,6 +330,35 @@ suspected slip, stop the run, mark the segment uncertain (mirroring how
 implausible odometry is already isolated), and either re-reference against a
 known wall or require re-docking rather than trusting the drifted pose.
 
+Recorded evidence (a real go-home forward leg that slipped, from a captured
+run's `events`):
+
+```json
+{"action": "forward", "requested": 702,
+ "raw_left_wheel_delta": 1968, "raw_right_wheel_delta": 5084,
+ "raw_yaw_delta": 120, "heading_delta": 8.2,
+ "distance_mm": 700.5, "accepted": true}
+```
+
+On a straight move the right wheel turned 2.6x the left (1968 vs 5084 ticks, a
+61% asymmetry) while the gyro measured only 8.2 degrees of rotation. The wheel
+difference implies a heading change of roughly 400 degrees; the gyro saw 8 — a
+gross mismatch that is the slip. Yet `validate_odometry` accepted it, because it
+only checks the gyro heading change (8 < the 45-degree limit) and averages the
+two wheels into a bogus 700 mm of travel. The pose was corrupted from that step
+on, and because `tracking_lost` stayed `false`, `run_pose_trustworthy` would
+still wrongly call the final pose safe.
+
+Planned next step (concrete): in `validate_odometry`, compute the wheel-implied
+heading change as `(right_delta - left_delta) * mm_per_wheel_tick / track_width`
+and reject the transition when it diverges from the gyro `heading_delta` beyond a
+tolerance. Dash's track width measured about 87 mm, backed out from clean turn
+events (for a pure rotation, `heading = (right - left) * mm_per_wheel_tick /
+track_width`); confirm it against several turns before hard-coding or calibrating
+it. The recorded event above is a positive test case, and the many normal events
+in the same run give the negative cases for setting the tolerance without false
+positives.
+
 Safety and correctness constraints:
 
 - Prefer a false stop over silently trusting a slipped pose; a corrupted pose
