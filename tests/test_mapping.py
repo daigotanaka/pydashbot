@@ -235,8 +235,9 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_obstacle_near_home_counts_as_arrival(self):
         obstacle = {"halt": "obstacle", "side": "front", "prox_left": 30, "prox_right": 27}
-        # An obstacle within tolerance of home is arrival at the corner walls.
+        # Obstacles within tolerance of home are arrival at the corner walls.
         self.assertTrue(map_room.obstacle_arrival_near_home(231, obstacle))
+        self.assertTrue(map_room.obstacle_arrival_near_home(327, obstacle))
         # The same obstacle far from home is a genuine blocked route.
         self.assertFalse(map_room.obstacle_arrival_near_home(800, obstacle))
         # A non-obstacle halt near home does not count (e.g. odometry/turn issue).
