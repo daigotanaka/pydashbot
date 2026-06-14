@@ -3,7 +3,7 @@
 import asyncio
 import logging
 
-from dash.actuators import encode_move
+from dash.actuators import compensate_turn, encode_move
 
 PROXIMITY_STOP_THRESHOLD = 15
 PROXIMITY_CONFIRM_COUNT = 3
@@ -21,6 +21,30 @@ TILT_CONFIRM_COUNT = 15
 TURN_SETTLE_SECONDS = 0.05
 TURN_STALL_WHEEL_COUNTS = 20   # below this, wheels effectively did not move
 TURN_STALL_YAW_COUNTS = 12     # below this, the gyro registered no rotation
+
+# Largest turn the move packet can carry. The angle is sent as centiradians in
+# a 10-bit magnitude field, so it rolls over at 1024 centiradians (~587 deg);
+# we cap just below that to keep the firmware seeing the angle we commanded.
+MAX_TURN_DEGREES = 585
+
+
+def to_packet_int(value, name):
+    """Coerce ``value`` to the int the packet encoder requires.
+
+    Dash's move packet packs ``distance_mm`` with bitwise operations, so a
+    float would raise ``TypeError``. We round to the nearest int and warn if
+    the rounded value differs from the original, since that loses precision.
+    """
+    converted = int(round(value))
+    if converted != value:
+        logging.warning(
+            "%s=%r is not an integer; encoding as %d (Dash packets require "
+            "integer values)",
+            name,
+            value,
+            converted,
+        )
+    return converted
 
 
 def wrap_signed_delta(previous, current, bits):
@@ -45,12 +69,15 @@ class MotionController:
         rotation. ``yaw_delta`` and the wheel deltas are raw sensor counts; the
         caller converts them to degrees with its own calibration.
         """
-        if abs(degrees) > 360:
+        if abs(degrees) > MAX_TURN_DEGREES:
             return {"halt": "invalid", "commanded_deg": degrees}
         yaw_before = self.get_yaw()
         left_before = self.get_left_wheel()
         right_before = self.get_right_wheel()
-        seconds = abs(degrees) / speed_dps
+        # Time the turn off the deadband-compensated angle so the commanded
+        # angular speed stays at speed_dps; encode_move applies the same
+        # compensation to the packet angle.
+        seconds = abs(compensate_turn(degrees)) / speed_dps
         await self.command("move", encode_move(0, degrees, seconds))
         await asyncio.sleep(seconds)
         await self.stop()
@@ -116,6 +143,7 @@ class MotionController:
         rear_proximity_streak = 0
 
         flags = 0x81 if no_turn and distance_mm < 0 else 0x80
+        distance_mm = to_packet_int(distance_mm, "distance_mm")
         await self.command("move", encode_move(distance_mm, 0, seconds, flags))
         logging.debug("Moving for %s seconds", seconds)
         if not stop_at_obstacle:

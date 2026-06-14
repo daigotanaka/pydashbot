@@ -9,6 +9,31 @@ from colour import Color
 from dash.constants import NOISES
 
 
+# Dash loses a roughly constant angle at the start of every turn while the
+# wheels overcome static friction and ramp up, then tracks ~1:1. Below it a
+# turn stalls entirely. We add it back so a commanded N-deg turn actually
+# rotates ~N deg. Measured on hardware as slightly asymmetric: counter-clockwise
+# (positive) needs ~1 deg more than clockwise (negative).
+TURN_DEADBAND_DEG_CCW = 19.5
+TURN_DEADBAND_DEG_CW = 18.5
+
+# The turn angle rides in a 10-bit centiradian magnitude field that rolls over
+# at 1024 (~587 deg); clamp to stay just under so compensation can't wrap it.
+MAX_TURN_CENTIRADIANS = 1023
+
+
+def compensate_turn(degrees):
+    """Add back Dash's fixed startup turn deficit so a turn lands on target.
+
+    Returns ``degrees`` unchanged for a non-turn (``0``); otherwise extends the
+    magnitude by the direction's deadband (CCW and CW differ by ~1 deg).
+    """
+    if not degrees:
+        return degrees
+    deadband = TURN_DEADBAND_DEG_CCW if degrees > 0 else TURN_DEADBAND_DEG_CW
+    return degrees + math.copysign(deadband, degrees)
+
+
 class PoseMode(IntEnum):
     """Pose interpretation modes."""
 
@@ -87,11 +112,14 @@ def encode_move(distance_mm=0, degrees=0, seconds=1.0, flags=0x80):
     if distance_mm and degrees:
         raise NotImplementedError("Concurrent move and turn not supported.")
 
+    degrees = compensate_turn(degrees)
+
     distance_low_byte = distance_mm & 0xFF
     distance_high_byte = (distance_mm >> 8) & 0x3F
     sixth_byte = distance_high_byte
 
     centiradians = int(math.radians(degrees) * 100)
+    centiradians = max(-MAX_TURN_CENTIRADIANS, min(MAX_TURN_CENTIRADIANS, centiradians))
     turn_low_byte = centiradians & 0xFF
     turn_high_byte = (centiradians >> 8) & 0x03
     sixth_byte |= turn_high_byte << 6

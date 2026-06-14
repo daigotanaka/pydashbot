@@ -1,7 +1,9 @@
+import math
 import unittest
 from itertools import count
 from unittest.mock import AsyncMock, patch
 
+from dash.actuators import compensate_turn
 from dash.robot import DashRobot
 
 
@@ -21,7 +23,7 @@ class TurnTests(unittest.IsolatedAsyncioTestCase):
         robot.get_right_wheel = lambda values=iter(right): next(values)
         return robot
 
-    async def test_left_and_right_turns_use_equal_angle_and_duration(self):
+    async def test_turns_encode_the_direction_compensated_angle_and_duration(self):
         with patch("dash.motion.asyncio.sleep", new=AsyncMock()) as sleep:
             robot = self.make_robot()
             await robot.turn(90)
@@ -33,12 +35,19 @@ class TurnTests(unittest.IsolatedAsyncioTestCase):
             right_packet = robot.command.await_args.args[1]
             right_duration = sleep.await_args_list[-2].args[0]
 
-        self.assertEqual(left_duration, right_duration)
+        # Each direction encodes its own deadband-compensated angle, and the
+        # duration is timed off that same compensated angle (default 85.9 dps).
         self.assertEqual(
             decode_turn_centiradians(left_packet),
-            -decode_turn_centiradians(right_packet),
+            int(math.radians(compensate_turn(90)) * 100),
         )
-        self.assertEqual(left_packet[3:5], right_packet[3:5])
+        self.assertEqual(
+            decode_turn_centiradians(right_packet),
+            int(math.radians(compensate_turn(-90)) * 100),
+        )
+        self.assertAlmostEqual(left_duration, abs(compensate_turn(90)) / 85.9)
+        self.assertAlmostEqual(right_duration, abs(compensate_turn(-90)) / 85.9)
+        # Direction sign flag still rides in byte 6.
         self.assertEqual(left_packet[6], 0x00)
         self.assertEqual(right_packet[6], 0xC0)
 

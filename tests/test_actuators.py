@@ -1,7 +1,13 @@
 import math
 import unittest
 
-from dash.actuators import encode_move
+from dash.actuators import (
+    MAX_TURN_CENTIRADIANS,
+    TURN_DEADBAND_DEG_CCW,
+    TURN_DEADBAND_DEG_CW,
+    compensate_turn,
+    encode_move,
+)
 
 
 def decode_distance(packet):
@@ -15,22 +21,22 @@ def decode_turn_centiradians(packet):
 
 
 class MoveEncodingTests(unittest.TestCase):
-    def test_large_turn_does_not_encode_forward_distance(self):
+    def test_turn_angle_is_deadband_compensated(self):
         packet = encode_move(0, 360, 1)
 
         self.assertEqual(decode_distance(packet), 0)
         self.assertEqual(
             decode_turn_centiradians(packet),
-            int(math.radians(360) * 100),
+            int(math.radians(compensate_turn(360)) * 100),
         )
 
-    def test_negative_large_turn_preserves_direction(self):
+    def test_negative_turn_compensates_and_preserves_direction(self):
         packet = encode_move(0, -360, 1)
 
         self.assertEqual(decode_distance(packet), 0)
         self.assertEqual(
             decode_turn_centiradians(packet),
-            int(math.radians(-360) * 100),
+            int(math.radians(compensate_turn(-360)) * 100),
         )
 
     def test_large_distance_does_not_encode_a_turn(self):
@@ -38,6 +44,18 @@ class MoveEncodingTests(unittest.TestCase):
 
         self.assertEqual(decode_distance(packet), 2048)
         self.assertEqual(decode_turn_centiradians(packet), 0)
+
+    def test_compensate_turn_extends_magnitude_in_command_direction(self):
+        self.assertEqual(compensate_turn(0), 0)
+        self.assertEqual(compensate_turn(90), 90 + TURN_DEADBAND_DEG_CCW)
+        self.assertEqual(compensate_turn(-90), -(90 + TURN_DEADBAND_DEG_CW))
+
+    def test_compensated_turn_is_clamped_below_field_rollover(self):
+        # A near-max command plus the deadband would overflow the 10-bit field
+        # and wrap to a tiny angle; it must clamp instead.
+        packet = encode_move(0, 585, 1)
+
+        self.assertEqual(decode_turn_centiradians(packet), MAX_TURN_CENTIRADIANS)
 
 
 if __name__ == "__main__":
