@@ -14,6 +14,19 @@ class ConservativeExplorationTests(unittest.TestCase):
         self.assertTrue(policy.allows_point(500, -500))
         self.assertFalse(policy.allows_point(500, 500))
 
+    def test_cells_crossed_between_path_endpoints_are_visited(self):
+        sparse_path = [(100, -100), (900, -100)]
+        dense_path = conservative.densify_path(sparse_path, 125)
+
+        resolution = conservative.territory_resolution(
+            (0, -1), dense_path, [], territory_mm=1000
+        )
+
+        self.assertEqual(
+            resolution["visited"],
+            {(0, 3), (1, 3), (2, 3), (3, 3)},
+        )
+
     def test_forward_distance_stops_inside_unlocked_territory(self):
         policy = conservative.ConservativeExploration([], (1000, 1000), [], [])
         self.assertEqual(policy.forward_distance(1000, 1000, 0, 3000), 825)

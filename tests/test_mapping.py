@@ -166,6 +166,20 @@ class MappingStrategyTests(unittest.TestCase):
         data = {"runs": [{"path": [[10, 20, 30], [40, 50, 60]]}]}
         self.assertEqual(map_room.map_start_pose(data), (10.0, 20.0, 30.0))
 
+    def test_map_knowledge_densifies_each_run_without_connecting_sessions(self):
+        data = {
+            "runs": [
+                {"path": [[0, 0, 0], [100, 0, 0]]},
+                {"path": [[900, 0, 0], [1000, 0, 0]]},
+            ]
+        }
+
+        path, _ = map_room.map_knowledge(data, path_sample_mm=50)
+
+        self.assertIn((50.0, 0.0), path)
+        self.assertIn((950.0, 0.0), path)
+        self.assertNotIn((500.0, 0.0), path)
+
     def test_home_route_uses_shortest_connected_traversed_path(self):
         data = {
             "runs": [

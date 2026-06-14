@@ -352,9 +352,10 @@ Mental walls are planning constraints only. They are stored as
 to the map's `walls` observations or rendered as real walls.
 
 Each territory is divided into a 4 x 4 reachability grid. Cells Dash traverses
-are visited. Cells containing real wall or obstacle observations are blocked,
-unless Dash has also traversed them. A flood fill from visited cells identifies
-the remaining reachable frontier and cells cut off behind physical blockers.
+are visited, including cells crossed between saved motion-command endpoints.
+Cells containing real wall or obstacle observations are blocked, unless Dash
+has also traversed them. A flood fill from visited cells identifies the
+remaining reachable frontier and cells cut off behind physical blockers.
 The mapper unlocks one adjacent territory after Dash has visited at least 3
 cells and no reachable unresolved frontier remains. This lets a physically
 small or enclosed area complete even when most of its 16 cells are unreachable,

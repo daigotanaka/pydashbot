@@ -12,6 +12,7 @@ try:
     from examples.mapping.conservative_exploration import (
         GRID_CELLS,
         TERRITORY_MM,
+        densify_path,
         territory_resolution,
     )
     from examples.mapping.exploration_walls import inferred_wall_segments
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
     from conservative_exploration import (
         GRID_CELLS,
         TERRITORY_MM,
+        densify_path,
         territory_resolution,
     )
     from exploration_walls import inferred_wall_segments
@@ -45,11 +47,6 @@ def accepted_runs(data):
 
 def render_cell_map(data, output, home_route=False):
     runs = accepted_runs(data)
-    path_points = [
-        (float(point[0]), float(point[1]))
-        for run in runs
-        for point in run.get('path', [])
-    ]
     walls = [
         (float(point[0]), float(point[1]))
         for run in runs
@@ -72,6 +69,11 @@ def render_cell_map(data, output, home_route=False):
     focus = tuple(policy.get('focus_territory', (0, 0)))
     territory_mm = float(policy.get('territory_size_mm', TERRITORY_MM))
     grid_mm = territory_mm / GRID_CELLS
+    path_points = [
+        point
+        for run in runs
+        for point in densify_path(run.get('path', []), grid_mm / 2)
+    ]
     # Match the explorer: link wall observations within one reachability cell.
     wall_segments = inferred_wall_segments(walls, max_distance=grid_mm)
     territories = [

@@ -34,6 +34,26 @@ def territory_cell(x, y, size=TERRITORY_MM):
     return math.floor(x / size), math.floor(y / size)
 
 
+def densify_path(points, max_step_mm):
+    """Return path points sampled densely enough to cover traversed cells."""
+    if not points:
+        return []
+    dense = [(float(points[0][0]), float(points[0][1]))]
+    for start, end in zip(points, points[1:]):
+        sx, sy = float(start[0]), float(start[1])
+        ex, ey = float(end[0]), float(end[1])
+        distance = math.hypot(ex - sx, ey - sy)
+        steps = max(1, math.ceil(distance / max_step_mm))
+        dense.extend(
+            (
+                sx + (ex - sx) * step / steps,
+                sy + (ey - sy) * step / steps,
+            )
+            for step in range(1, steps + 1)
+        )
+    return dense
+
+
 def territory_coverage(cell, points, territory_mm=TERRITORY_MM):
     grid_mm = territory_mm / GRID_CELLS
     cx, cy = cell

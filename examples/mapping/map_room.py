@@ -26,6 +26,7 @@ try:
         ConservativeExploration,
         GRID_CELLS,
         TERRITORY_MM,
+        densify_path,
     )
     from examples.mapping.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
@@ -42,6 +43,7 @@ except ModuleNotFoundError:
         ConservativeExploration,
         GRID_CELLS,
         TERRITORY_MM,
+        densify_path,
     )
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
@@ -337,14 +339,21 @@ def run_pose_trustworthy(run):
     )
 
 
-def map_knowledge(data):
+def map_knowledge(data, path_sample_mm=None):
     """Extract path and blocker points used by the exploration strategy."""
     runs = accepted_runs(data)
-    path_points = [
-        (float(point[0]), float(point[1]))
-        for run in runs
-        for point in run.get('path', [])
-    ]
+    if path_sample_mm is None:
+        path_points = [
+            (float(point[0]), float(point[1]))
+            for run in runs
+            for point in run.get('path', [])
+        ]
+    else:
+        path_points = [
+            point
+            for run in runs
+            for point in densify_path(run.get('path', []), path_sample_mm)
+        ]
     if data.get('schema_version', 1) >= 2:
         blocker_source = [
             point
@@ -1160,7 +1169,11 @@ def explore(
         'tracking_lost': False,
         'issues': [],
     }
-    known_path, known_blockers = map_knowledge(strategy_map or {})
+    cell_mm = territory_mm / GRID_CELLS
+    path_sample_mm = cell_mm / 2
+    known_path, known_blockers = map_knowledge(
+        strategy_map or {}, path_sample_mm=path_sample_mm
+    )
     known_walls = [
         (float(point[0]), float(point[1]))
         for run in accepted_runs(strategy_map or {})
@@ -1174,7 +1187,6 @@ def explore(
     # Link wall observations within one reachability cell, so a smaller
     # territory infers continuous walls at a proportionally finer scale
     # (cell = territory / grid). Replaces the former fixed 300 mm threshold.
-    cell_mm = territory_mm / GRID_CELLS
     known_wall_segments = inferred_wall_segments(known_walls, max_distance=cell_mm)
     policy = (
         ConservativeExploration(
@@ -1233,12 +1245,15 @@ def explore(
         elif quality['tracking_lost']:
             event['issues'] = ['pose tracking was already lost']
         else:
+            previous_position = (x, y)
             heading = normalize_heading(heading + heading_delta)
             hr = math.radians(heading)
             x += d_mm * math.cos(hr)
             y += d_mm * math.sin(hr)
             path.append((x, y, heading))
-            known_path.append((x, y))
+            known_path.extend(
+                densify_path([previous_position, (x, y)], path_sample_mm)[1:]
+            )
             quality['accepted_updates'] += 1
             if policy:
                 policy.report_progress()
