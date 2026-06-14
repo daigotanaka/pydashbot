@@ -8,6 +8,7 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from dash.ws_client import build_uri, parse_args as parse_client_args
 from dash.ws_server import (
+    center_head,
     execute_request,
     greet_robot,
     handle_client,
@@ -36,6 +37,12 @@ class FakeRobot:
 
     def disconnect(self):
         self.calls.append(("disconnect",))
+
+    def head_yaw(self, angle):
+        self.calls.append(("head_yaw", angle))
+
+    def head_pitch(self, angle):
+        self.calls.append(("head_pitch", angle))
 
 
 class WebSocketProtocolTests(unittest.TestCase):
@@ -149,6 +156,13 @@ class WebSocketLifecycleTests(unittest.TestCase):
         greet_robot(robot)
 
         self.assertEqual(robot.calls, [("say", "hi")])
+
+    def test_center_head_returns_head_to_neutral(self):
+        robot = FakeRobot()
+
+        center_head(robot)
+
+        self.assertEqual(robot.calls, [("head_yaw", 0), ("head_pitch", 0)])
 
     def test_robot_stops_and_says_bye_before_disconnect(self):
         robot = FakeRobot()

@@ -73,6 +73,16 @@ def greet_robot(robot):
     robot.say("hi")
 
 
+def center_head(robot):
+    """Return the head to its neutral angle (level, facing forward).
+
+    Done once on the first connection, not on reconnects, so a recovered link
+    does not disturb a head pose a client has since set.
+    """
+    robot.head_yaw(0)
+    robot.head_pitch(0)
+
+
 def say_goodbye_and_disconnect(robot):
     try:
         robot.stop()
@@ -232,6 +242,7 @@ def main():
 
     try:
         greet_robot(robot)
+        center_head(robot)
         with open(PID_PATH, "w") as pid_file:
             pid_file.write(str(os.getpid()))
         asyncio.run(run_server(robot, host=args.host, port=args.port))
