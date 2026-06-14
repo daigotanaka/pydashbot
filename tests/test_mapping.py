@@ -39,7 +39,18 @@ class MappingStrategyTests(unittest.TestCase):
                 map_room.parse_args(["start", "--config", str(config)])
 
     def test_default_mapping_config_uses_conservative_exploration(self):
-        self.assertFalse(map_room.parse_args(["start"]).no_conservative_exploration)
+        self.assertEqual(
+            map_room.parse_args(["start"]).exploration_policy, "conservative"
+        )
+
+    def test_mapping_config_rejects_unknown_exploration_policy(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.yaml"
+            config.write_text(
+                '{"map_file":"map.json","exploration_policy":"nope"}'
+            )
+            with self.assertRaises(SystemExit):
+                map_room.parse_args(["start", "--config", str(config)])
 
     def test_mapping_config_sets_reusable_run_options(self):
         with TemporaryDirectory() as directory:
@@ -50,7 +61,7 @@ class MappingStrategyTests(unittest.TestCase):
                         "map_file": "data/room_map.json",
                         "calibration": "data/calibration.json",
                         "duration_seconds": 300,
-                        "conservative_exploration": False,
+                        "exploration_policy": "coverage",
                         "territory_size_mm": 1500,
                         "go_home_strategy": "hard-blocked-edge",
                     }
@@ -63,7 +74,7 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(options.map_file, "data/room_map.json")
         self.assertEqual(options.calibration, "data/calibration.json")
         self.assertEqual(options.duration, 300)
-        self.assertTrue(options.no_conservative_exploration)
+        self.assertEqual(options.exploration_policy, "coverage")
         self.assertEqual(options.territory_size, 1500)
         self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
 
@@ -896,7 +907,7 @@ class MappingStrategyTests(unittest.TestCase):
                 1500.0,
                 1000.0,
                 duration=3,
-                conservative_exploration=False,
+                exploration_policy="novelty",
             )
 
         move = next(call for call in calls if call[0] == "move")

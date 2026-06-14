@@ -35,13 +35,22 @@ reusable mapping settings:
 map_file: data/room_map.json
 calibration: data/calibration/calibration_20260612.json
 duration_seconds: 60
-conservative_exploration: true
+exploration_policy: conservative
 territory_size_mm: 1000
 policy:
   - name: preset
     input_file: data/course.json
 go_home_strategy: d-star-lite
 ```
+
+`exploration_policy` selects the heading policy by name (like
+`go_home_strategy`): `conservative` (bounded territories, frontier-alignment
+objective; the default), `coverage` (bounded territories, maximize
+newly-visited cells per leg — see
+[The coverage objective](#step-5-done-the-coverage-objective--coverageexploration)),
+or `novelty` (no territory limit, head toward unexplored space). The separate
+`policy:` list below is the *command* (preset course) policy and overrides
+heading selection while it runs.
 
 Exploration policies are ordered by priority. When `policy` is present, the
 first policy drives the robot. The `preset` policy reads a JSON command course
@@ -147,8 +156,8 @@ than re-driving cells it has already visited. Each leg stops early on a wall, a
 tilt, or a territory boundary; odometry is validated after every command and
 loop-closure corrections against known landmarks bound the drift. As cells are
 resolved the policy unlocks adjacent territory so the explored region grows
-compactly. Set `conservative_exploration` to `false` for undirected forward
-legs, or change `territory_size_mm` to adjust the territory granularity.
+compactly. Set `exploration_policy: novelty` for undirected forward legs, or
+change `territory_size_mm` to adjust the territory granularity.
 
 `duration_seconds` defaults to 60. `start` creates `map_file` when it does not
 exist and appends a new run when it does.
@@ -415,7 +424,7 @@ uncharted territory so the explored region grows compactly.
 
 This feature is experimental and isolated in
 `examples/mapping/conservative_exploration.py`. Set
-`conservative_exploration` to `false` to disable it.
+`exploration_policy: novelty` to disable it.
 
 The core explorer interacts with the policy only through optional hooks for
 heading constraints, forward-distance limits, progress reporting, territory
@@ -479,8 +488,8 @@ regime is owned by the next step.
 
 `coverage_exploration.py` adds `CoverageExploration`, a subclass of
 `ConservativeExploration` that reflects the redefined objective directly.
-Enable it with `coverage_objective: true` in the config (it only takes effect
-when `conservative_exploration` is also true). It reuses the parent's territory
+Enable it with `exploration_policy: coverage` in the config. It reuses the
+parent's territory
 constraint/unlock/expansion machinery and changes two things:
 
 - **Objective in `heading_preference`:** rewards the **count of new reachable,

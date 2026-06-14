@@ -140,11 +140,20 @@ GO_HOME_STRATEGIES = {
     ACTIVE_GO_HOME_STRATEGY.name: ACTIVE_GO_HOME_STRATEGY,
     LEGACY_GO_HOME_STRATEGY.name: LEGACY_GO_HOME_STRATEGY,
 }
+# Heading policy selected by name in the config (like go_home_strategy).
+# `novelty` is the unconstrained default base; `conservative` and `coverage`
+# are bounded-territory policies (subclasses of ConservativeExploration).
+EXPLORATION_POLICIES = {
+    'novelty': NoveltyExplorationPolicy,
+    'conservative': ConservativeExploration,
+    'coverage': CoverageExploration,
+}
+DEFAULT_EXPLORATION_POLICY = 'conservative'
 MAPPING_CONFIG_KEYS = {
     'map_file',
     'calibration',
     'duration_seconds',
-    'conservative_exploration',
+    'exploration_policy',
     'territory_size_mm',
     'go_home_strategy',
     'policy',
@@ -208,15 +217,9 @@ def apply_mapping_config(options, config, parser):
     )
     options.policy = validate_policy_config(config.get('policy', []), parser)
 
-    conservative = config.get('conservative_exploration', True)
-    if not isinstance(conservative, bool):
-        parser.error("config conservative_exploration must be true or false")
-    options.no_conservative_exploration = not conservative
-
-    coverage = config.get('coverage_objective', False)
-    if not isinstance(coverage, bool):
-        parser.error("config coverage_objective must be true or false")
-    options.coverage_objective = coverage
+    options.exploration_policy = config.get(
+        'exploration_policy', DEFAULT_EXPLORATION_POLICY
+    )
 
     try:
         options.duration = positive_seconds(options.duration)
@@ -227,6 +230,11 @@ def apply_mapping_config(options, config, parser):
         parser.error(
             "config go_home_strategy must be one of: "
             f"{', '.join(GO_HOME_STRATEGIES)}"
+        )
+    if options.exploration_policy not in EXPLORATION_POLICIES:
+        parser.error(
+            "config exploration_policy must be one of: "
+            f"{', '.join(EXPLORATION_POLICIES)}"
         )
 
 
@@ -1119,10 +1127,9 @@ class _ExplorationRun:
         heading0=0.0,
         strategy_map=None,
         duration=DURATION,
-        conservative_exploration=True,
         territory_mm=TERRITORY_MM,
         command_policy=None,
-        coverage_objective=False,
+        exploration_policy=DEFAULT_EXPLORATION_POLICY,
     ):
         self.deg_per_yaw = deg_per_yaw
         self.mm_per_wd = mm_per_wd
@@ -1172,13 +1179,12 @@ class _ExplorationRun:
         self.known_wall_segments = inferred_wall_segments(
             self.known_walls, max_distance=self.cell_mm
         )
-        # There is always a policy: a bounded-territory policy when conservative
-        # exploration is on, otherwise the unconstrained novelty default.
-        if conservative_exploration:
-            territory_policy = (
-                CoverageExploration if coverage_objective else ConservativeExploration
-            )
-            self.policy = territory_policy(
+        # There is always a policy, selected by name. Bounded-territory policies
+        # (subclasses of ConservativeExploration) take the territory state;
+        # the unconstrained novelty default takes only the live path.
+        policy_class = EXPLORATION_POLICIES[exploration_policy]
+        if issubclass(policy_class, ConservativeExploration):
+            self.policy = policy_class(
                 accepted_runs(strategy_map or {}),
                 (self.x, self.y),
                 self.known_path,
@@ -1187,7 +1193,7 @@ class _ExplorationRun:
                 territory_mm,
             )
         else:
-            self.policy = NoveltyExplorationPolicy(
+            self.policy = policy_class(
                 self.known_path, STRATEGY_SAMPLE_DISTANCES
             )
         self.known_path.append((self.x, self.y))
@@ -1535,10 +1541,9 @@ def explore(
     heading0=0.0,
     strategy_map=None,
     duration=DURATION,
-    conservative_exploration=True,
     territory_mm=TERRITORY_MM,
     command_policy=None,
-    coverage_objective=False,
+    exploration_policy=DEFAULT_EXPLORATION_POLICY,
 ):
     """Drive one exploration run and return its recorded map contribution.
 
@@ -1553,10 +1558,9 @@ def explore(
         heading0,
         strategy_map,
         duration,
-        conservative_exploration,
         territory_mm,
         command_policy,
-        coverage_objective,
+        exploration_policy,
     )
     run.announce()
     if not command_policy:
@@ -1711,10 +1715,9 @@ def main(args=None):
                 heading0,
                 strategy_map,
                 duration=options.duration,
-                conservative_exploration=not options.no_conservative_exploration,
                 territory_mm=options.territory_size,
                 command_policy=command_policy,
-                coverage_objective=options.coverage_objective,
+                exploration_policy=options.exploration_policy,
             )
         ]
     for run in produced_runs:
