@@ -132,7 +132,6 @@ class ConservativeExplorationTests(unittest.TestCase):
             x,
             y,
             heading,
-            path,
             [],
             require_turn=True,
             point_allowed=policy.allows_point,

@@ -9,6 +9,7 @@ from examples.mapping import calibrate
 from examples.mapping import conservative_exploration as conservative
 from examples.mapping import exploration_policies
 from examples.mapping import map_room
+from examples.mapping.exploration_policy import NoveltyExplorationPolicy
 
 FIXTURES = Path(__file__).parent / "data"
 
@@ -743,9 +744,7 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_strategy_avoids_known_blockers(self):
         blockers = [(400, 0), (800, 0), (1200, 0)]
-        angle = map_room.choose_exploration_angle(
-            0, 0, 0, [(0, 0)], blockers
-        )
+        angle = map_room.choose_exploration_angle(0, 0, 0, blockers)
         self.assertNotEqual(angle, 0)
 
     def test_core_strategy_avoids_inferred_continuous_wall(self):
@@ -755,7 +754,6 @@ class MappingStrategyTests(unittest.TestCase):
             0,
             0,
             0,
-            [(0, 0)],
             [],
             wall_segments=wall_segments,
         )
@@ -763,18 +761,23 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_strategy_turns_away_from_live_proximity(self):
         left_blocked = map_room.choose_exploration_angle(
-            0, 0, 0, [], [], blocked_left=20, require_turn=True
+            0, 0, 0, [], blocked_left=20, require_turn=True
         )
         right_blocked = map_room.choose_exploration_angle(
-            0, 0, 0, [], [], blocked_right=20, require_turn=True
+            0, 0, 0, [], blocked_right=20, require_turn=True
         )
         self.assertLess(left_blocked, 0)
         self.assertGreater(right_blocked, 0)
 
-    def test_strategy_rewards_unexplored_direction(self):
+    def test_novelty_policy_rewards_unexplored_direction(self):
+        # Novelty is now a policy preference, not baked into heading_score.
         explored_east = [(distance, 0) for distance in (400, 800, 1200, 1600)]
+        policy = NoveltyExplorationPolicy(
+            explored_east, map_room.STRATEGY_SAMPLE_DISTANCES
+        )
         angle = map_room.choose_exploration_angle(
-            0, 0, 0, explored_east, [], require_turn=False
+            0, 0, 0, [], require_turn=False,
+            heading_preference=policy.heading_preference,
         )
         self.assertNotEqual(angle, 0)
 
@@ -783,7 +786,6 @@ class MappingStrategyTests(unittest.TestCase):
             1800,
             1000,
             0,
-            [(1800, 1000)],
             [],
             point_allowed=lambda x, y: conservative.territory_cell(x, y) == (0, 0),
         )

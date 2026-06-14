@@ -3,12 +3,14 @@
 import math
 
 try:
+    from examples.mapping.exploration_policy import ExplorationPolicy
     from examples.mapping.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
         segment_crosses_wall,
     )
 except ModuleNotFoundError:
+    from exploration_policy import ExplorationPolicy
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
@@ -148,8 +150,8 @@ def territory_sufficiently_mapped(
     return len(resolution['visited']) >= MIN_VISITED_CELLS and not resolution['frontier']
 
 
-class ConservativeExploration:
-    """Optional policy that confines exploration to unlocked square territories."""
+class ConservativeExploration(ExplorationPolicy):
+    """Policy that confines exploration to unlocked square territories."""
 
     metadata_key = 'conservative_exploration'
 

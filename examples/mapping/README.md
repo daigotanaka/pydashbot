@@ -421,6 +421,89 @@ The core explorer interacts with the policy only through optional hooks for
 heading constraints, forward-distance limits, progress reporting, territory
 unlocking, and run metadata.
 
+## Exploration Objective And Policy Architecture (work in progress)
+
+This section captures an in-progress redesign so it survives across sessions.
+
+### The objective we are optimizing for
+
+The robot should be incentivized to **maximize the number of cells marked
+visited**, subject to the **conservative-exploration constraint**: it may only
+enter a new territory after finishing (unlocking from) the current one. That
+constraint is enforced as a hard gate (`allows_point` / `forward_distance`);
+the objective is the *positive* part of the score.
+
+### Turn decision = `heading_score` (argmax over candidate angles)
+
+`choose_exploration_angle` picks the next turn by maximizing
+`heading_score(...)` over a fixed candidate set. We are refactoring so that:
+
+> `heading_score = policy.heading_preference (positive/preference)
+>                  − physical_constraints (negative penalties)`
+
+- **Physical constraints stay in `heading_score`** for now: turn cost,
+  `point_allowed` (territory wall), known-blocker corridor, inferred-wall
+  crossing, and live-proximity penalties. These are all negative.
+- **All positive (preference) scoring moves into a policy class.** A policy
+  exposes `heading_preference(x, y, heading)` returning the positive signal.
+  `heading_score` no longer contains any reward term (the old novelty reward is
+  relocated — see below) and no longer takes `path_points`.
+
+### Policy class hierarchy
+
+- `ExplorationPolicy` (abstract base, `exploration_policy.py`): defines the
+  interface the explorer/`heading_score` use, with safe "unconstrained"
+  defaults — `allows_point→True`, `forward_distance→desired`,
+  `unlock_if_complete`/`report_progress`→no-op, `expand_past_boundary→False`,
+  `metadata→{}`. The one abstract method is `heading_preference`.
+- `NoveltyExplorationPolicy` (the **default** policy, also in
+  `exploration_policy.py`): `heading_preference` is the relocated novelty
+  reward `Σ min(nearest_path_dist, 800) * 0.35` over the sample distances. Used
+  when conservative exploration is disabled. No territory constraint.
+- `ConservativeExploration` (`conservative_exploration.py`): now subclasses
+  `ExplorationPolicy`. Each concrete policy lives in its own file (1 file, 1
+  class), except the ABC and the default `NoveltyExplorationPolicy` which share
+  `exploration_policy.py`.
+
+`_ExplorationRun` always holds a policy now (Novelty when not conservative), so
+the old `if policy is None` guards are gone.
+
+**Known behavior change from this refactor:** conservative mode no longer adds
+the novelty term — its only positive signal is
+`ConservativeExploration.heading_preference`. When the focus territory has a
+frontier this barely matters (frontier ≫ novelty); when the focus has *no*
+frontier the explore pull collapses to bare `clearance`. That no-frontier
+regime is owned by the next step.
+
+### Step 5 (done): the coverage objective — `CoverageExploration`
+
+`coverage_exploration.py` adds `CoverageExploration`, a subclass of
+`ConservativeExploration` that reflects the redefined objective directly.
+Enable it with `coverage_objective: true` in the config (it only takes effect
+when `conservative_exploration` is also true). It reuses the parent's territory
+constraint/unlock/expansion machinery and changes two things:
+
+- **Objective in `heading_preference`:** rewards the **count of new reachable,
+  unvisited cells a leg would enter** (`COVERAGE_CELL_WEIGHT` per cell) instead
+  of the parent's alignment-to-nearest-frontier heuristic, with a weak
+  alignment fallback when no new cell is reachable this leg.
+- **Stateful no-progress signal:** a focus that gains no new cells over
+  `STALL_LEGS` (3) turn decisions is added to `abandoned`, relinquished, and
+  reselected. This catches the **unreachable-in-practice** case (visited = 0,
+  cells stay `frontier` because reachability needs a visited seed) that the
+  exhausted-focus rule (`territory_explored`, visited ≥ 1 and frontier = 0)
+  cannot. `abandoned` persists in run metadata so resumed runs don't re-trap.
+  The accounting lives in `unlock_if_complete` (once per decision); the
+  `heading_preference` scorer stays pure/side-effect-free.
+
+Verified on the stuck 4-run map: a focus the robot cannot enter (`(0,0)` then
+`(-1,-1)`) is abandoned after 3 legs and focus moves to fresh, reachable
+territory (`(0,-2)`) instead of re-roaming.
+
+Relevant code: `heading_score` / `choose_exploration_angle` in
+`examples/mapping/map_room.py`; `exploration_policy.py`;
+`conservative_exploration.py`; `coverage_exploration.py`.
+
 ### Next Challenge: A Better Retry Planner
 
 The D* Lite strategy now applies localized soft costs and keeps blocked proven

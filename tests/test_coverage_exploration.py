@@ -1,0 +1,89 @@
+import unittest
+
+from examples.mapping import conservative_exploration as conservative
+from examples.mapping.coverage_exploration import STALL_LEGS, CoverageExploration
+from examples.mapping.exploration_policy import ExplorationPolicy
+
+FULLY_EXPLORED_SOUTH = [
+    (x, y)
+    for x in (125, 375, 625, 875)
+    for y in (-875, -625, -375, -125)
+]
+
+
+class CoverageExplorationTests(unittest.TestCase):
+    def test_is_an_exploration_policy(self):
+        policy = CoverageExploration([], (80, -80), [], [], territory_mm=1000)
+        self.assertIsInstance(policy, ExplorationPolicy)
+        self.assertIsInstance(policy, conservative.ConservativeExploration)
+
+    def test_abandons_a_focus_it_cannot_enter(self):
+        # Reproduces the stuck run: focus (0, 0) is north of the dock wall, so
+        # the robot never reaches a cell there (visited stays 0, cells stay
+        # frontier). The unreachable-marking rule cannot relinquish it; the
+        # no-progress signal must, after STALL_LEGS legs with no new cells.
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1], [0, 0]],
+                    "focus_territory": [0, 0],
+                }
+            }
+        ]
+        policy = CoverageExploration(
+            runs,
+            FULLY_EXPLORED_SOUTH[0],
+            FULLY_EXPLORED_SOUTH,
+            [],
+            territory_mm=1000,
+        )
+        self.assertEqual(policy.focus, (0, 0))
+
+        for _ in range(STALL_LEGS):
+            policy.unlock_if_complete()
+
+        self.assertIn((0, 0), policy.abandoned)
+        self.assertNotEqual(policy.focus, (0, 0))
+        # It moved on toward the explored region, not deeper into the dead north.
+        self.assertNotIn(policy.focus, {(1, 0), (-1, 0), (0, 1)})
+
+    def test_resets_stall_when_focus_gains_a_cell(self):
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1]],
+                    "focus_territory": [0, -1],
+                }
+            }
+        ]
+        # Start with one visited cell; the focus has a real frontier.
+        path = [(125, -875)]
+        policy = CoverageExploration(runs, path[0], path, [], territory_mm=1000)
+        policy.unlock_if_complete()
+        policy.unlock_if_complete()
+        # A new cell gets visited (progress) -> the stall counter resets.
+        path.append((375, -875))
+        policy.unlock_if_complete()
+        self.assertEqual(policy._stall_legs, 0)
+        self.assertNotIn((0, -1), policy.abandoned)
+
+    def test_heading_preference_prefers_entering_a_new_cell(self):
+        # Two cells visited along the south edge; the cell to the north is a
+        # reachable frontier. Heading north (into the new cell) must beat
+        # heading back over the already-visited cell to the west.
+        path = [(375, -875), (625, -875)]
+        policy = CoverageExploration([], path[0], path, [], territory_mm=1000)
+        toward_new_cell = policy.heading_preference(375, -875, 90)   # +y, into frontier
+        over_visited = policy.heading_preference(375, -875, 180)     # -x, over visited
+        self.assertGreater(toward_new_cell, over_visited)
+
+    def test_metadata_records_objective_and_abandoned(self):
+        policy = CoverageExploration([], (80, -80), [], [], territory_mm=1000)
+        policy.abandoned.add((9, 9))
+        meta = policy.metadata()
+        self.assertEqual(meta['objective'], 'coverage')
+        self.assertIn([9, 9], [list(cell) for cell in meta['abandoned']])
+
+
+if __name__ == "__main__":
+    unittest.main()

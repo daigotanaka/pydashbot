@@ -28,6 +28,8 @@ try:
         TERRITORY_MM,
         densify_path,
     )
+    from examples.mapping.coverage_exploration import CoverageExploration
+    from examples.mapping.exploration_policy import NoveltyExplorationPolicy
     from examples.mapping.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
@@ -46,6 +48,8 @@ except ModuleNotFoundError:
         TERRITORY_MM,
         densify_path,
     )
+    from coverage_exploration import CoverageExploration
+    from exploration_policy import NoveltyExplorationPolicy
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
@@ -208,6 +212,11 @@ def apply_mapping_config(options, config, parser):
     if not isinstance(conservative, bool):
         parser.error("config conservative_exploration must be true or false")
     options.no_conservative_exploration = not conservative
+
+    coverage = config.get('coverage_objective', False)
+    if not isinstance(coverage, bool):
+        parser.error("config coverage_objective must be true or false")
+    options.coverage_objective = coverage
 
     try:
         options.duration = positive_seconds(options.duration)
@@ -415,7 +424,6 @@ def heading_score(
     y,
     heading,
     turn_angle,
-    path_points,
     blockers,
     blocked_left=0,
     blocked_right=0,
@@ -423,7 +431,13 @@ def heading_score(
     heading_preference=None,
     wall_segments=(),
 ):
-    """Score a candidate heading for clearance and expected map knowledge."""
+    """Score a candidate heading as policy preference minus physical penalties.
+
+    All *positive* (preferred) scoring comes from ``heading_preference`` (an
+    ``ExplorationPolicy`` hook); everything here is a physical-constraint
+    penalty: turn cost, leaving the allowed region, known blockers, inferred
+    walls, and live proximity.
+    """
     hr = math.radians(heading + turn_angle)
     ux, uy = math.cos(hr), math.sin(hr)
     score = -abs(turn_angle) * 0.35
@@ -432,12 +446,6 @@ def heading_score(
         sx, sy = x + distance * ux, y + distance * uy
         if point_allowed is not None and not point_allowed(sx, sy):
             score -= 5000
-            continue
-        if path_points:
-            nearest = min(math.hypot(sx - px, sy - py) for px, py in path_points)
-            score += min(nearest, 800) * 0.35
-        else:
-            score += 280
 
     for bx, by in blockers:
         dx, dy = bx - x, by - y
@@ -471,7 +479,6 @@ def choose_exploration_angle(
     x,
     y,
     heading,
-    path_points,
     blockers,
     blocked_left=0,
     blocked_right=0,
@@ -489,7 +496,6 @@ def choose_exploration_angle(
             y,
             heading,
             turn,
-            path_points,
             blockers,
             blocked_left,
             blocked_right,
@@ -1116,6 +1122,7 @@ class _ExplorationRun:
         conservative_exploration=True,
         territory_mm=TERRITORY_MM,
         command_policy=None,
+        coverage_objective=False,
     ):
         self.deg_per_yaw = deg_per_yaw
         self.mm_per_wd = mm_per_wd
@@ -1165,8 +1172,13 @@ class _ExplorationRun:
         self.known_wall_segments = inferred_wall_segments(
             self.known_walls, max_distance=self.cell_mm
         )
-        self.policy = (
-            ConservativeExploration(
+        # There is always a policy: a bounded-territory policy when conservative
+        # exploration is on, otherwise the unconstrained novelty default.
+        if conservative_exploration:
+            territory_policy = (
+                CoverageExploration if coverage_objective else ConservativeExploration
+            )
+            self.policy = territory_policy(
                 accepted_runs(strategy_map or {}),
                 (self.x, self.y),
                 self.known_path,
@@ -1174,9 +1186,10 @@ class _ExplorationRun:
                 self.known_wall_segments,
                 territory_mm,
             )
-            if conservative_exploration
-            else None
-        )
+        else:
+            self.policy = NoveltyExplorationPolicy(
+                self.known_path, STRATEGY_SAMPLE_DISTANCES
+            )
         self.known_path.append((self.x, self.y))
 
     # -- pose tracking -----------------------------------------------------
@@ -1234,8 +1247,7 @@ class _ExplorationRun:
                 )[1:]
             )
             self.quality['accepted_updates'] += 1
-            if self.policy:
-                self.policy.report_progress()
+            self.policy.report_progress()
         self.events.append(event)
         if not event['accepted']:
             return None
@@ -1243,21 +1255,17 @@ class _ExplorationRun:
 
     # -- steering ----------------------------------------------------------
     def turn_toward_knowledge(self, reason, left=0, right=0, require_turn=False):
-        if self.policy:
-            self.policy.unlock_if_complete()
+        self.policy.unlock_if_complete()
         turn_angle = choose_exploration_angle(
             self.x,
             self.y,
             self.heading,
-            self.known_path,
             self.known_blockers,
             blocked_left=left,
             blocked_right=right,
             require_turn=require_turn,
-            point_allowed=self.policy.allows_point if self.policy else None,
-            heading_preference=(
-                self.policy.heading_preference if self.policy else None
-            ),
+            point_allowed=self.policy.allows_point,
+            heading_preference=self.policy.heading_preference,
             wall_segments=self.known_wall_segments,
         )
         print(f'\n  [{reason}] map-guided turn {turn_angle:+.0f}°')
@@ -1323,8 +1331,7 @@ class _ExplorationRun:
             self.known_wall_segments[:] = inferred_wall_segments(
                 self.known_walls, max_distance=self.cell_mm
             )
-        if self.policy:
-            self.policy.report_progress()
+        self.policy.report_progress()
 
     def report_leg(self, remaining, traveled, left, right, tilt):
         print(
@@ -1377,14 +1384,10 @@ class _ExplorationRun:
                 f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
                 "walls and tilt stop each leg early."
             )
-        if self.policy:
-            print(self.policy.describe())
-        else:
-            print("  Experimental conservative exploration disabled.")
+        print(self.policy.describe())
         send_command('say', 'hi')
         send_command('neck_color', '#00ff00')
-        if self.policy:
-            self.policy.report_progress()
+        self.policy.report_progress()
         if self.command_policy:
             print(
                 f"  Command policy: {self.command_policy.name} "
@@ -1453,19 +1456,15 @@ class _ExplorationRun:
         while time.time() < end_time and not self.quality['tracking_lost']:
             remaining = end_time - time.time()
             desired_distance = forward_distance_for_remaining(remaining)
-            requested_distance = (
-                self.policy.forward_distance(
-                    self.x, self.y, self.heading, desired_distance
-                )
-                if self.policy
-                else desired_distance
+            requested_distance = self.policy.forward_distance(
+                self.x, self.y, self.heading, desired_distance
             )
             policy_limit_reached = requested_distance < desired_distance
             if requested_distance < MIN_FORWARD_DISTANCE_MM:
                 # Pinned against the invisible territory wall. If the territory
                 # the robot is in is fully mapped, unlock the one ahead and
                 # re-evaluate instead of turning back.
-                if self.policy and self.policy.expand_past_boundary(
+                if self.policy.expand_past_boundary(
                     self.x, self.y, self.heading
                 ):
                     continue
@@ -1509,8 +1508,6 @@ class _ExplorationRun:
             'obstacles': self.obstacles,
             **(
                 {self.policy.metadata_key: self.policy.metadata()}
-                if self.policy
-                else {}
             ),
             **(
                 {
@@ -1541,6 +1538,7 @@ def explore(
     conservative_exploration=True,
     territory_mm=TERRITORY_MM,
     command_policy=None,
+    coverage_objective=False,
 ):
     """Drive one exploration run and return its recorded map contribution.
 
@@ -1558,6 +1556,7 @@ def explore(
         conservative_exploration,
         territory_mm,
         command_policy,
+        coverage_objective,
     )
     run.announce()
     if not command_policy:
@@ -1715,6 +1714,7 @@ def main(args=None):
                 conservative_exploration=not options.no_conservative_exploration,
                 territory_mm=options.territory_size,
                 command_policy=command_policy,
+                coverage_objective=options.coverage_objective,
             )
         ]
     for run in produced_runs:
