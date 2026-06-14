@@ -1,8 +1,0 @@
-{
-  "map_file": "data/room_map.json",
-  "calibration": "data/calibration/calibration_20260612.json",
-  "duration_seconds": 60,
-  "conservative_exploration": true,
-  "territory_size_mm": 1000,
-  "go_home_strategy": "d-star-lite"
-}

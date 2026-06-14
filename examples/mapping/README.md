@@ -28,18 +28,16 @@ and mapping scripts use the running server instead of connecting directly.
 
 ## Configuration
 
-The provided [`config/config.json`](config/config.json) stores the map path and
+The provided [`config/config.yaml`](config/config.yaml) stores the map path and
 reusable mapping settings:
 
-```json
-{
-  "map_file": "data/room_map.json",
-  "calibration": "data/calibration/calibration_20260612.json",
-  "duration_seconds": 60,
-  "conservative_exploration": true,
-  "territory_size_mm": 1000,
-  "go_home_strategy": "d-star-lite"
-}
+```yaml
+map_file: data/room_map.json
+calibration: data/calibration/calibration_20260612.json
+duration_seconds: 60
+conservative_exploration: true
+territory_size_mm: 1000
+go_home_strategy: d-star-lite
 ```
 
 Choose one positional run mode:
@@ -101,6 +99,12 @@ orientation:
 4. Drive forward until a front proximity sensor detects the adjacent wall.
 5. Reverse 80 mm to clear that wall.
 6. Turn right 90 degrees to face into the room.
+
+The resulting coordinate frame uses heading `0°` along `+x` into the room.
+Because the adjacent wall is on Dash's left, that wall is at `y=0` and open
+room lies toward negative `y`. Fresh maps therefore start at approximately
+`(80,-80)` in territory `(0,-1)`. Existing maps retain their saved start pose
+and coordinate frame.
 
 It then explores until the requested duration ends:
 
@@ -212,7 +216,7 @@ uv run --extra tools examples/mapping/map_room.py resume
 
 1. Start the WebSocket server.
 2. Set `map_file`, `calibration`, and `duration_seconds` in
-   `examples/mapping/config/config.json`.
+   `examples/mapping/config/config.yaml`.
 3. Place Dash at the starting corner and run:
 
 ```bash
@@ -509,7 +513,7 @@ uv run --extra tools examples/mapping/map_room.py dock
 Use a different config:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py start --config path/to/config.json
+uv run --extra tools examples/mapping/map_room.py start --config path/to/config.yaml
 ```
 
 Show mapper usage:

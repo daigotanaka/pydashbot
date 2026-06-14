@@ -1,0 +1,11 @@
+map_file: data/room_map.json
+calibration: data/calibration/calibration_20260612.json
+duration_seconds: 30
+conservative_exploration: true
+territory_size_mm: 1000
+
+# Available go-home strategies:
+# - d-star-lite
+# - hard-blocked-edge
+go_home_strategy: d-star-lite
+  # go_home_strategy: hard-blocked-edge

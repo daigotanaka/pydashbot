@@ -29,7 +29,7 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_mapping_config_requires_positive_duration(self):
         with TemporaryDirectory() as directory:
-            config = Path(directory) / "mapping.json"
+            config = Path(directory) / "mapping.yaml"
             config.write_text('{"map_file":"map.json","duration_seconds":0}')
             with self.assertRaises(SystemExit):
                 map_room.parse_args(["start", "--config", str(config)])
@@ -39,7 +39,7 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_mapping_config_sets_reusable_run_options(self):
         with TemporaryDirectory() as directory:
-            config = Path(directory) / "mapping.json"
+            config = Path(directory) / "mapping.yaml"
             config.write_text(
                 json.dumps(
                     {
@@ -65,7 +65,7 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_custom_config_file_is_selected_from_cli(self):
         with TemporaryDirectory() as directory:
-            config = Path(directory) / "mapping.json"
+            config = Path(directory) / "mapping.yaml"
             config.write_text(
                 json.dumps(
                     {
@@ -85,14 +85,35 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_mapping_config_rejects_unknown_settings(self):
         with TemporaryDirectory() as directory:
-            config = Path(directory) / "mapping.json"
+            config = Path(directory) / "mapping.yaml"
             config.write_text('{"mystery": true}')
+            with self.assertRaises(SystemExit):
+                map_room.parse_args(["start", "--config", str(config)])
+
+    def test_mapping_config_accepts_yaml_comments(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.yaml"
+            config.write_text(
+                "map_file: room_map.json\n"
+                "# Available strategies: d-star-lite, hard-blocked-edge\n"
+                "go_home_strategy: hard-blocked-edge\n"
+            )
+
+            options = map_room.parse_args(["dock", "--config", str(config)])
+
+        self.assertEqual(options.map_file, "room_map.json")
+        self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
+
+    def test_mapping_config_rejects_invalid_yaml(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.yaml"
+            config.write_text("map_file: [\n")
             with self.assertRaises(SystemExit):
                 map_room.parse_args(["start", "--config", str(config)])
 
     def test_mapping_config_requires_map_file(self):
         with TemporaryDirectory() as directory:
-            config = Path(directory) / "mapping.json"
+            config = Path(directory) / "mapping.yaml"
             config.write_text('{"duration_seconds": 60}')
             with self.assertRaises(SystemExit):
                 map_room.parse_args(["start", "--config", str(config)])
@@ -116,7 +137,7 @@ class MappingStrategyTests(unittest.TestCase):
 
     def test_resume_and_dock_require_configured_map_before_robot_commands(self):
         with TemporaryDirectory() as directory:
-            config = Path(directory) / "mapping.json"
+            config = Path(directory) / "mapping.yaml"
             config.write_text(
                 json.dumps({"map_file": str(Path(directory) / "missing.json")})
             )
@@ -499,10 +520,11 @@ class MappingStrategyTests(unittest.TestCase):
             patch.object(map_room, "send_command", side_effect=send_command),
             patch.object(map_room.time, "sleep"),
         ):
-            map_room.dock_to_corner(1.0, 1.0)
+            pose = map_room.dock_to_corner(1.0, 1.0)
 
         turns = [args[0] for method, args, _ in calls if method == "turn"]
         self.assertEqual(turns, [90, -90])
+        self.assertEqual(pose, (80.0, -80.0))
 
     def test_odometry_validation_rejects_negative_forward_distance(self):
         issues = map_room.validate_odometry("forward", 3000, -1668, -2.6)

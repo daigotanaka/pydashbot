@@ -18,6 +18,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 from dash.ws_client import send_command
 try:
     from examples.mapping.conservative_exploration import (
@@ -140,7 +142,7 @@ MAPPING_CONFIG_KEYS = {
     'territory_size_mm',
     'go_home_strategy',
 }
-DEFAULT_MAPPING_CONFIG = Path(__file__).with_name('config') / 'config.json'
+DEFAULT_MAPPING_CONFIG = Path(__file__).with_name('config') / 'config.yaml'
 
 WALL_SOUNDS   = ['ohno', 'ayayay', 'huh', 'confused2', 'confused3']
 TILT_SOUNDS   = ['ayayay', 'ohno', 'confused5', 'confused8']
@@ -161,7 +163,7 @@ def parse_args(args=None):
         '--config',
         metavar='CONFIG_FILE',
         default=str(DEFAULT_MAPPING_CONFIG),
-        help=f"load JSON settings from CONFIG_FILE (default: {DEFAULT_MAPPING_CONFIG})",
+        help=f"load YAML settings from CONFIG_FILE (default: {DEFAULT_MAPPING_CONFIG})",
     )
     options = parser.parse_args(args)
     config = load_mapping_config(Path(options.config), parser)
@@ -170,15 +172,15 @@ def parse_args(args=None):
 
 
 def load_mapping_config(config_file, parser):
-    """Load and validate the mapper's human-editable JSON configuration."""
+    """Load and validate the mapper's human-editable YAML configuration."""
     try:
-        config = json.loads(config_file.read_text())
+        config = yaml.safe_load(config_file.read_text())
     except OSError as exc:
         parser.error(f"cannot read config file {config_file}: {exc}")
-    except json.JSONDecodeError as exc:
-        parser.error(f"invalid JSON in config file {config_file}: {exc}")
+    except yaml.YAMLError as exc:
+        parser.error(f"invalid YAML in config file {config_file}: {exc}")
     if not isinstance(config, dict):
-        parser.error(f"config file {config_file} must contain a JSON object")
+        parser.error(f"config file {config_file} must contain a YAML mapping")
     unknown = sorted(set(config) - MAPPING_CONFIG_KEYS)
     if unknown:
         parser.error(f"unknown config setting(s): {', '.join(unknown)}")
@@ -696,10 +698,10 @@ def dock_to_corner(deg_per_yaw, mm_per_wd):
     send_command('turn', -90)
     time.sleep(0.3)
 
-    # Robot is now at approximately (DOCK_CLEARANCE_MM, DOCK_CLEARANCE_MM)
-    # relative to the corner, facing into the room (heading 0°).
+    # Facing +x into the room, the rear wall is at x=0 and the left wall is at
+    # y=0. The room therefore lies at +x/-y from the corner.
     x0 = float(DOCK_CLEARANCE_MM)
-    y0 = float(DOCK_CLEARANCE_MM)
+    y0 = -float(DOCK_CLEARANCE_MM)
     print(f"  Docked. Starting position: ({x0:.0f}, {y0:.0f}) mm from corner, heading 0°")
     send_command('neck_color', '#00ffff')
     return x0, y0

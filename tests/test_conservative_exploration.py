@@ -6,6 +6,14 @@ from examples.mapping import map_room
 
 
 class ConservativeExplorationTests(unittest.TestCase):
+    def test_fresh_dock_unlocks_territory_inside_room(self):
+        policy = conservative.ConservativeExploration([], (80, -80), [], [])
+
+        self.assertEqual(policy.territories, [(0, -1)])
+        self.assertEqual(policy.focus, (0, -1))
+        self.assertTrue(policy.allows_point(500, -500))
+        self.assertFalse(policy.allows_point(500, 500))
+
     def test_forward_distance_stops_inside_unlocked_territory(self):
         policy = conservative.ConservativeExploration([], (1000, 1000), [], [])
         self.assertEqual(policy.forward_distance(1000, 1000, 0, 3000), 825)

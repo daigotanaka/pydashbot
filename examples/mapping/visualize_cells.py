@@ -187,9 +187,11 @@ def render_cell_map(data, output, home_route=False):
                 zorder=10,
             )
 
+    start_y = float(runs[0]['path'][0][1]) if runs and runs[0].get('path') else -1
+    wall_y = -territory_mm if start_y < 0 else territory_mm
     ax.plot([0, territory_mm], [0, 0], 'k-', linewidth=2, alpha=0.5,
             label='Dock walls')
-    ax.plot([0, 0], [0, territory_mm], 'k-', linewidth=2, alpha=0.5)
+    ax.plot([0, 0], [0, wall_y], 'k-', linewidth=2, alpha=0.5)
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.2)
     ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(1.01, 1))
