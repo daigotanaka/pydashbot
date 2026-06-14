@@ -7,7 +7,10 @@ from unittest.mock import patch
 
 from examples.mapping import calibrate
 from examples.mapping import conservative_exploration as conservative
+from examples.mapping import exploration_policies
 from examples.mapping import map_room
+
+FIXTURES = Path(__file__).parent / "data"
 
 
 class MappingStrategyTests(unittest.TestCase):
@@ -62,6 +65,27 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertTrue(options.no_conservative_exploration)
         self.assertEqual(options.territory_size, 1500)
         self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
+
+    def test_mapping_config_preserves_policy_priority_order(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.yaml"
+            config.write_text(
+                "map_file: data/room_map.json\n"
+                "policy:\n"
+                "  - name: preset\n"
+                "    input_file: data/course.json\n"
+                "  - name: later-policy\n"
+            )
+
+            options = map_room.parse_args(["start", "--config", str(config)])
+
+        self.assertEqual(
+            options.policy,
+            [
+                {"name": "preset", "input_file": "data/course.json"},
+                {"name": "later-policy"},
+            ],
+        )
 
     def test_custom_config_file_is_selected_from_cli(self):
         with TemporaryDirectory() as directory:
@@ -179,6 +203,88 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertIn((50.0, 0.0), path)
         self.assertIn((950.0, 0.0), path)
         self.assertNotIn((500.0, 0.0), path)
+
+    def test_preset_course_visits_expected_cells_and_ends_in_cell_zero_two(self):
+        policy = exploration_policies.load_exploration_policy(
+            [
+                {"name": "preset", "input_file": str(FIXTURES / "course.json")},
+                {"name": "lower-priority-policy"},
+            ]
+        )
+        readings = {
+            "get_yaw": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
+            "get_pitch": iter([0] * 8),
+            "get_prox_left": iter([0] * 3),
+            "get_prox_right": iter([0] * 3),
+        }
+        calls = []
+
+        def send_command(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method in readings:
+                return {"ok": True, "result": next(readings[method])}
+            return {"ok": True, "result": None}
+
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(
+                map_room.time,
+                "time",
+                side_effect=AssertionError(
+                    "preset policy must not wait for or inspect the timeout"
+                ),
+            ),
+            patch.object(
+                map_room,
+                "read_settled",
+                side_effect=[
+                    0, 250, 250,
+                    -90, 300, 200,
+                    -90, 550, 450,
+                    -180, 600, 400,
+                    -180, 850, 650,
+                ],
+            ),
+        ):
+            run = map_room.explore(
+                1.0,
+                1.0,
+                80.0,
+                -80.0,
+                duration=60,
+                command_policy=policy,
+            )
+
+        cells = [
+            conservative.local_grid_cell((0, -1), point[0], point[1])
+            for point in run["path"]
+        ]
+        self.assertEqual(
+            cells,
+            [(0, 3), (1, 3), (1, 3), (1, 2), (1, 2), (0, 2)],
+        )
+        self.assertAlmostEqual(run["path"][-1][0], 80.0)
+        self.assertAlmostEqual(run["path"][-1][1], -330.0)
+        resolution = conservative.territory_resolution(
+            (0, -1),
+            conservative.densify_path(run["path"], 125),
+            [],
+        )
+        self.assertEqual(
+            resolution["visited"],
+            {(0, 2), (0, 3), (1, 2), (1, 3)},
+        )
+        self.assertEqual(run["exploration_policy"]["name"], "preset")
+        self.assertTrue(run["exploration_policy"]["completed"])
+        self.assertEqual(run["exploration_policy"]["commands_completed"], 5)
+        moves = [call for call in calls if call[0] == "move"]
+        self.assertEqual([move[1][0] for move in moves], [250, 250, 250])
+        self.assertEqual([move[1][1] for move in moves], [200, 200, 200])
+        self.assertFalse(moves[0][2]["stop_at_obstacle"])
+        self.assertTrue(moves[1][2]["stop_at_obstacle"])
+        self.assertTrue(moves[2][2]["stop_at_obstacle"])
 
     def test_home_route_uses_shortest_connected_traversed_path(self):
         data = {

@@ -1,8 +1,17 @@
 map_file: data/room_map.json
-calibration: data/calibration/calibration_20260612.json
-duration_seconds: 30
+calibration: data/calibration/calibration_20260613-18-39-49.json
+duration_seconds: 60
 conservative_exploration: true
 territory_size_mm: 1000
+
+# Available exploration policies:
+# - preset
+# - map-guided (active when policy is omitted)
+#
+# Exploration policies are ordered by priority; the first policy drives.
+policy:
+  - name: preset
+    input_file: data/course.json
 
 # Available go-home strategies:
 # - d-star-lite

@@ -33,6 +33,7 @@ try:
         inferred_wall_segments,
         point_segment_distance,
     )
+    from examples.mapping.exploration_policies import load_exploration_policy
     from examples.mapping.go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
@@ -50,6 +51,7 @@ except ModuleNotFoundError:
         inferred_wall_segments,
         point_segment_distance,
     )
+    from exploration_policies import load_exploration_policy
     from go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
@@ -143,6 +145,7 @@ MAPPING_CONFIG_KEYS = {
     'conservative_exploration',
     'territory_size_mm',
     'go_home_strategy',
+    'policy',
 }
 DEFAULT_MAPPING_CONFIG = Path(__file__).with_name('config') / 'config.yaml'
 
@@ -201,6 +204,7 @@ def apply_mapping_config(options, config, parser):
     options.go_home_strategy = config.get(
         'go_home_strategy', ACTIVE_GO_HOME_STRATEGY.name
     )
+    options.policy = validate_policy_config(config.get('policy', []), parser)
 
     conservative = config.get('conservative_exploration', True)
     if not isinstance(conservative, bool):
@@ -217,6 +221,21 @@ def apply_mapping_config(options, config, parser):
             "config go_home_strategy must be one of: "
             f"{', '.join(GO_HOME_STRATEGIES)}"
         )
+
+
+def validate_policy_config(policy, parser):
+    """Validate ordered command-policy configuration."""
+    if policy is None:
+        return []
+    if not isinstance(policy, list):
+        parser.error("config policy must be a list")
+    for index, item in enumerate(policy):
+        if not isinstance(item, dict):
+            parser.error(f"config policy item {index + 1} must be a mapping")
+        name = item.get('name')
+        if not isinstance(name, str) or not name.strip():
+            parser.error(f"config policy item {index + 1} requires a non-empty name")
+    return policy
 
 
 def positive_seconds(value):
@@ -1147,6 +1166,7 @@ def explore(
     duration=DURATION,
     conservative_exploration=True,
     territory_mm=TERRITORY_MM,
+    command_policy=None,
 ):
     yaw_prev = send_command('get_yaw')['result']
     left_prev = send_command('get_left_wheel')['result']
@@ -1169,6 +1189,7 @@ def explore(
         'tracking_lost': False,
         'issues': [],
     }
+    policy_commands_completed = 0
     cell_mm = territory_mm / GRID_CELLS
     path_sample_mm = cell_mm / 2
     known_path, known_blockers = map_knowledge(
@@ -1349,7 +1370,12 @@ def explore(
             end='\r',
         )
 
-    def handle_leg_end(traveled, requested_distance, policy_limit_reached=False):
+    def handle_leg_end(
+        traveled,
+        requested_distance,
+        policy_limit_reached=False,
+        record_early_stop_obstacle=True,
+    ):
         left = send_command('get_prox_left')['result']
         right = send_command('get_prox_right')['result']
         pitch = send_command('get_pitch')['result']
@@ -1362,7 +1388,8 @@ def explore(
             mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
             return left, right, tilt, f'tilt {tilt:+.0f}', TILT_SOUNDS, True
         if abs(traveled) < requested_distance * 0.8:
-            mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
+            if record_early_stop_obstacle:
+                mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
             return left, right, tilt, 'early stop', WALL_SOUNDS, True
         if policy_limit_reached:
             return left, right, tilt, 'exploration boundary', None, False
@@ -1373,11 +1400,14 @@ def explore(
         send_command('say', 'bye')
         send_command('neck_color', '#ffffff')
 
-    print(f"\n=== Exploring for {duration:g}s ===")
-    print(
-        f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
-        "walls and tilt stop each leg early."
-    )
+    if command_policy:
+        print(f"\n=== Exploring preset course ===")
+    else:
+        print(f"\n=== Exploring for {duration:g}s ===")
+        print(
+            f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
+            "walls and tilt stop each leg early."
+        )
     if policy:
         print(policy.describe())
     else:
@@ -1386,49 +1416,111 @@ def explore(
     send_command('neck_color', '#00ff00')
     if policy:
         policy.report_progress()
-    turn_toward_knowledge('initial strategy')
-
-    end_time = time.time() + duration
+    if command_policy:
+        print(
+            f"  Command policy: {command_policy.name} "
+            f"({len(command_policy.commands)} commands)"
+        )
+    else:
+        turn_toward_knowledge('initial strategy')
+        end_time = time.time() + duration
 
     try:
-        while time.time() < end_time and not quality['tracking_lost']:
-            remaining = end_time - time.time()
-            desired_distance = forward_distance_for_remaining(remaining)
-            requested_distance = (
-                policy.forward_distance(x, y, heading, desired_distance)
-                if policy
-                else desired_distance
-            )
-            policy_limit_reached = requested_distance < desired_distance
-            if requested_distance < MIN_FORWARD_DISTANCE_MM:
-                redirect('exploration boundary')
-                continue
-            send_command(
-                'move',
-                requested_distance,
-                FORWARD_SPEED_MMPS,
-                wall_stop_sound=None,
-            )
-            traveled = update_pose('forward', requested_distance)
-            remaining = max(0.0, end_time - time.time())
-            if traveled is None:
-                left = send_command('get_prox_left')['result']
-                right = send_command('get_prox_right')['result']
-                tilt = send_command('get_pitch')['result'] - baseline_pitch
-                reason, sounds, back_away = 'odometry rejected', None, False
-                traveled = 0.0
-                report_leg(remaining, traveled, left, right, tilt)
-                break
-            else:
-                left, right, tilt, reason, sounds, back_away = handle_leg_end(
-                    traveled,
-                    requested_distance,
-                    policy_limit_reached,
+        if command_policy:
+            for index, command in enumerate(command_policy.commands, start=1):
+                if quality['tracking_lost']:
+                    break
+                name, value = command['command'], command['value']
+                print(
+                    f"\n  [preset {index}/{len(command_policy.commands)}] "
+                    f"{name} {value:g}"
                 )
-            report_leg(remaining, traveled, left, right, tilt)
+                if name == 'turn':
+                    for step in tracked_turn_steps(value):
+                        send_command('turn', step)
+                        if update_pose('turn', step) is None:
+                            break
+                    if quality['tracking_lost']:
+                        break
+                    policy_commands_completed = index
+                    continue
+                response = send_command(
+                    'move',
+                    value,
+                    SENSOR_SAFE_SPEED_MMPS,
+                    wall_stop_sound=None,
+                    stop_at_obstacle=command['stop_at_obstacle'],
+                )
+                if not response.get('ok', False):
+                    quality['tracking_lost'] = True
+                    issue = f"preset move command failed: {response.get('error', 'unknown error')}"
+                    quality['issues'].append(issue)
+                    events.append(
+                        {
+                            'action': 'forward',
+                            'requested': value,
+                            'accepted': False,
+                            'issues': [issue],
+                            'motion_response': response,
+                        }
+                    )
+                    print(f"\n  [preset halted] {issue}")
+                    break
+                traveled = update_pose('forward', value)
+                events[-1]['motion_outcome'] = response['result']
+                if traveled is None:
+                    break
+                left, right, tilt, reason, _, back_away = handle_leg_end(
+                    traveled,
+                    value,
+                    record_early_stop_obstacle=command['stop_at_obstacle'],
+                )
+                report_leg(0.0, traveled, left, right, tilt)
+                if back_away:
+                    print(f"\n  [preset halted] {reason}")
+                    break
+                policy_commands_completed = index
+            if policy_commands_completed == len(command_policy.commands):
+                print("\n  [preset complete] final action finished")
+        else:
+            while time.time() < end_time and not quality['tracking_lost']:
+                remaining = end_time - time.time()
+                desired_distance = forward_distance_for_remaining(remaining)
+                requested_distance = (
+                    policy.forward_distance(x, y, heading, desired_distance)
+                    if policy
+                    else desired_distance
+                )
+                policy_limit_reached = requested_distance < desired_distance
+                if requested_distance < MIN_FORWARD_DISTANCE_MM:
+                    redirect('exploration boundary')
+                    continue
+                send_command(
+                    'move',
+                    requested_distance,
+                    FORWARD_SPEED_MMPS,
+                    wall_stop_sound=None,
+                )
+                traveled = update_pose('forward', requested_distance)
+                remaining = max(0.0, end_time - time.time())
+                if traveled is None:
+                    left = send_command('get_prox_left')['result']
+                    right = send_command('get_prox_right')['result']
+                    tilt = send_command('get_pitch')['result'] - baseline_pitch
+                    reason, sounds, back_away = 'odometry rejected', None, False
+                    traveled = 0.0
+                    report_leg(remaining, traveled, left, right, tilt)
+                    break
+                else:
+                    left, right, tilt, reason, sounds, back_away = handle_leg_end(
+                        traveled,
+                        requested_distance,
+                        policy_limit_reached,
+                    )
+                report_leg(remaining, traveled, left, right, tilt)
 
-            if time.time() < end_time:
-                redirect(reason, sounds, back_away, left, right)
+                if time.time() < end_time:
+                    redirect(reason, sounds, back_away, left, right)
 
     except KeyboardInterrupt:
         print('\nInterrupted.')
@@ -1445,6 +1537,19 @@ def explore(
         'walls': walls,
         'obstacles': obstacles,
         **({policy.metadata_key: policy.metadata()} if policy else {}),
+        **(
+            {
+                'exploration_policy': {
+                    **command_policy.metadata(),
+                    'commands_completed': policy_commands_completed,
+                    'completed': (
+                        policy_commands_completed == len(command_policy.commands)
+                    ),
+                }
+            }
+            if command_policy
+            else {}
+        ),
         'events': events,
     }
 
@@ -1515,6 +1620,11 @@ def main(args=None):
     map_file = Path(options.map_file)
     if options.mode in {'resume', 'dock'} and not map_file.exists():
         raise ValueError(f"{options.mode} requires existing map file {map_file}")
+    command_policy = (
+        load_exploration_policy(options.policy)
+        if options.mode != 'dock'
+        else None
+    )
 
     send_command('stop')
     time.sleep(1.0)
@@ -1577,6 +1687,7 @@ def main(args=None):
                 duration=options.duration,
                 conservative_exploration=not options.no_conservative_exploration,
                 territory_mm=options.territory_size,
+                command_policy=command_policy,
             )
         ]
     for run in produced_runs:

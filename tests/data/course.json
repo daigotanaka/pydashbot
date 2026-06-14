@@ -1,0 +1,25 @@
+{
+  "commands": [
+    {
+      "command": "move",
+      "value": 250,
+      "stop_at_obstacle": false
+    },
+    {
+      "command": "turn",
+      "value": -90
+    },
+    {
+      "command": "move",
+      "value": 250
+    },
+    {
+      "command": "turn",
+      "value": -90
+    },
+    {
+      "command": "move",
+      "value": 250
+    }
+  ]
+}

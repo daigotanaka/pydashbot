@@ -37,8 +37,35 @@ calibration: data/calibration/calibration_20260612.json
 duration_seconds: 60
 conservative_exploration: true
 territory_size_mm: 1000
+policy:
+  - name: preset
+    input_file: data/course.json
 go_home_strategy: d-star-lite
 ```
+
+Exploration policies are ordered by priority. When `policy` is present, the
+first policy drives the robot. The `preset` policy reads a JSON command course
+and executes it through the normal mapping odometry and safety checks. Preset
+exploration finishes immediately after its final action; `duration_seconds`
+does not keep it running. Remove `policy` to use the normal map-guided
+exploration strategy.
+
+The provided `data/course.json` runs this cell-conversion check from the dock
+pose `(80,-80)`:
+
+```text
+move 250, turn -90, move 250, turn -90, move 250
+```
+
+With ideal motion, it visits `(0,-1)` cells `(0,3)`, `(1,3)`, `(1,2)`, and
+ends in `(0,2)`.
+
+The first move sets `stop_at_obstacle: false` because it intentionally departs
+parallel to the known dock wall, which can remain visible to a front proximity
+sensor and otherwise prevent the move from starting. Use this override only for
+bounded moves whose path has been physically verified. Preset moves remain
+limited to the sensor-safe `200 mm/s` speed even when obstacle monitoring is
+disabled.
 
 Choose one positional run mode:
 
