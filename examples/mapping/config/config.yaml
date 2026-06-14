@@ -9,12 +9,12 @@ territory_size_mm: 1000
 # - map-guided (active when policy is omitted)
 #
 # Exploration policies are ordered by priority; the first policy drives.
-policy:
-  - name: preset
-    input_file: data/course.json
+# policy:
+#   - name: preset
+#    input_file: data/course.json
 
 # Available go-home strategies:
 # - d-star-lite
 # - hard-blocked-edge
-go_home_strategy: d-star-lite
-  # go_home_strategy: hard-blocked-edge
+# go_home_strategy: d-star-lite
+go_home_strategy: hard-blocked-edge
