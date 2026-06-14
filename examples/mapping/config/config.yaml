@@ -1,6 +1,6 @@
 map_file: data/room_map.json
 calibration: data/calibration/calibration_20260613-18-39-49.json
-duration_seconds: 300
+duration_seconds: 60
 # Heading policy (selected by name):
 # - conservative : bounded territories, frontier-alignment objective
 # - coverage     : bounded territories, maximize newly-visited cells per leg
