@@ -1493,6 +1493,11 @@ def explore(
                 )
                 policy_limit_reached = requested_distance < desired_distance
                 if requested_distance < MIN_FORWARD_DISTANCE_MM:
+                    # Pinned against the invisible territory wall. If the
+                    # territory the robot is in is fully mapped, unlock the one
+                    # ahead and re-evaluate instead of turning back.
+                    if policy and policy.expand_past_boundary(x, y, heading):
+                        continue
                     redirect('exploration boundary')
                     continue
                 send_command(

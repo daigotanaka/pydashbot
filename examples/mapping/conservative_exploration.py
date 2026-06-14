@@ -392,6 +392,50 @@ class ConservativeExploration:
             f'focus to {self.focus}'
         )
 
+    def territory_ahead(self, x, y, heading):
+        """Return the first territory along ``heading`` that differs from here."""
+        current = territory_cell(x, y, self.territory_mm)
+        hr = math.radians(heading)
+        ux, uy = math.cos(hr), math.sin(hr)
+        distance = WALL_SAMPLE_MM
+        limit = self.territory_mm + WALL_RECOVERY_MM
+        while distance <= limit:
+            cell = territory_cell(
+                x + distance * ux, y + distance * uy, self.territory_mm
+            )
+            if cell != current:
+                return cell
+            distance += WALL_SAMPLE_MM
+        return None
+
+    def expand_past_boundary(self, x, y, heading):
+        """Unlock the territory ahead when the one the robot is in is mapped.
+
+        Called when the invisible territory wall blocks forward progress.
+        Unlike ``unlock_if_complete`` (which only acts on ``self.focus``), this
+        is driven by the territory the robot physically occupies: once that one
+        is sufficiently mapped, the robot is free to cross into the adjacent
+        territory it is heading toward. The previous territory stays unlocked,
+        so the robot may return to it later. Returns ``True`` when a new
+        territory was unlocked.
+        """
+        current = territory_cell(x, y, self.territory_mm)
+        if not territory_sufficiently_mapped(
+            current, self.path_points, self.blockers, self.wall_segments,
+            self.territory_mm,
+        ):
+            return False
+        ahead = self.territory_ahead(x, y, heading)
+        if ahead is None or ahead in self.territories:
+            return False
+        self.territories.append(ahead)
+        self.focus = ahead
+        print(
+            f'\n  [territory expanded] {current} fully mapped; unlocking '
+            f'{ahead} ahead and continuing exploration'
+        )
+        return True
+
     def describe(self):
         return (
             f"  Conservative territory {self.focus}: "

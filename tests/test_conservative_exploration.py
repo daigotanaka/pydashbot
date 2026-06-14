@@ -236,6 +236,80 @@ class ConservativeExplorationTests(unittest.TestCase):
         self.assertEqual(policy.focus, (0, -1))
         self.assertEqual(policy.territories, [(0, 0), (0, -1)])
 
+    def test_expands_into_territory_ahead_when_current_is_complete(self):
+        # Reproduces the saved scenario: focus (0, 0) still has frontier, but
+        # the territory the robot is in, (0, -1), is fully mapped. Heading into
+        # the un-unlocked (0, -2) must unlock it rather than stall at the wall.
+        covered = [
+            (x, y)
+            for x in (125, 375, 625, 875)
+            for y in (-875, -625, -375, -125)
+        ]
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, 0], [0, -1]],
+                    "focus_territory": [0, 0],
+                }
+            }
+        ]
+        policy = conservative.ConservativeExploration(
+            runs,
+            covered[0],
+            covered,
+            [],
+            territory_mm=1000,
+        )
+
+        unlocked = policy.expand_past_boundary(500, -950, -90)
+
+        self.assertTrue(unlocked)
+        self.assertEqual(policy.territories, [(0, 0), (0, -1), (0, -2)])
+        self.assertEqual(policy.focus, (0, -2))
+
+    def test_does_not_expand_when_current_territory_incomplete(self):
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, 0], [0, -1]],
+                    "focus_territory": [0, 0],
+                }
+            }
+        ]
+        # Only one cell of (0, -1) visited: it still has frontier.
+        policy = conservative.ConservativeExploration(
+            runs,
+            (500, -500),
+            [(500, -500)],
+            [],
+            territory_mm=1000,
+        )
+
+        self.assertFalse(policy.expand_past_boundary(500, -950, -90))
+        self.assertEqual(policy.territories, [(0, 0), (0, -1)])
+        self.assertEqual(policy.focus, (0, 0))
+
+    def test_does_not_re_expand_into_already_unlocked_territory(self):
+        # (0, -1) complete and unlocked; heading back into it must not re-add it.
+        covered = [
+            (x, y)
+            for x in (125, 375, 625, 875)
+            for y in (-875, -625, -375, -125)
+        ]
+        policy = conservative.ConservativeExploration(
+            [],
+            covered[0],
+            covered,
+            [],
+            territory_mm=1000,
+        )
+        policy.territories = [(0, 0), (0, -1)]
+        policy.focus = (0, 0)
+
+        # From (0, -1) heading north (+90) crosses into already-unlocked (0, 0).
+        self.assertFalse(policy.expand_past_boundary(500, -50, 90))
+        self.assertEqual(policy.territories, [(0, 0), (0, -1)])
+
     def test_heading_preference_avoids_inferred_wall_segment(self):
         path = [(250, 250)]
         walls = [(500, 350), (700, 350)]
