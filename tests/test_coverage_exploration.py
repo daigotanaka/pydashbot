@@ -77,6 +77,53 @@ class CoverageExplorationTests(unittest.TestCase):
         over_visited = policy.heading_preference(375, -875, 180)     # -x, over visited
         self.assertGreater(toward_new_cell, over_visited)
 
+    def test_forward_leg_stops_before_reentering_completed_territory(self):
+        # (0, -1) is fully explored; the robot stands in still-uncharted (0, -2).
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -2], [0, -1]],
+                    "focus_territory": [0, -2],
+                }
+            }
+        ]
+        policy = CoverageExploration(
+            runs, (500, -1500), FULLY_EXPLORED_SOUTH, [], territory_mm=1000
+        )
+        self.assertTrue(policy.territory_explored((0, -1)))
+
+        parent_forward_distance = conservative.ConservativeExploration.forward_distance
+
+        # Heading north re-enters completed (0, -1): the leg is clamped at the
+        # boundary, well short of where the unlocked-region clamp would allow.
+        north = policy.forward_distance(500, -1500, 90, 2000)
+        north_unclamped = parent_forward_distance(policy, 500, -1500, 90, 2000)
+        self.assertLess(north, north_unclamped)
+        self.assertLess(north, 600)
+
+        # Heading deeper into the uncharted current territory is not extra-clamped.
+        south = policy.forward_distance(500, -1500, -90, 2000)
+        south_unclamped = parent_forward_distance(policy, 500, -1500, -90, 2000)
+        self.assertEqual(south, south_unclamped)
+
+    def test_heading_into_completed_territory_scores_as_no_progress(self):
+        # The clamp makes a heading into finished territory read as no-progress,
+        # so it loses to a heading into the uncharted current territory.
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -2], [0, -1]],
+                    "focus_territory": [0, -2],
+                }
+            }
+        ]
+        policy = CoverageExploration(
+            runs, (500, -1500), FULLY_EXPLORED_SOUTH, [], territory_mm=1000
+        )
+        into_completed = policy.heading_preference(500, -1100, 90)   # north into (0,-1)
+        into_uncharted = policy.heading_preference(500, -1100, -90)  # south, stays in (0,-2)
+        self.assertGreater(into_uncharted, into_completed)
+
     def test_metadata_records_objective_and_abandoned(self):
         policy = CoverageExploration([], (80, -80), [], [], territory_mm=1000)
         policy.abandoned.add((9, 9))

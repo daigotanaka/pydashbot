@@ -32,10 +32,13 @@ try:
         NO_PROGRESS_PENALTY,
         REVISIT_PENALTY,
         TERRITORY_MM,
+        WALL_CLEARANCE_MM,
+        WALL_SAMPLE_MM,
         WALL_SEGMENT_CLEARANCE_WEIGHT,
         WALL_SEGMENT_PENALTY,
         grid_cell_center,
         local_grid_cell,
+        territory_cell,
         territory_coverage,
         territory_resolution,
     )
@@ -51,10 +54,13 @@ except ModuleNotFoundError:
         NO_PROGRESS_PENALTY,
         REVISIT_PENALTY,
         TERRITORY_MM,
+        WALL_CLEARANCE_MM,
+        WALL_SAMPLE_MM,
         WALL_SEGMENT_CLEARANCE_WEIGHT,
         WALL_SEGMENT_PENALTY,
         grid_cell_center,
         local_grid_cell,
+        territory_cell,
         territory_coverage,
         territory_resolution,
     )
@@ -101,6 +107,33 @@ class CoverageExploration(ConservativeExploration):
         return len(
             territory_coverage(self.focus, self.path_points, self.territory_mm)
         )
+
+    def forward_distance(self, x, y, heading, desired_distance):
+        # Beyond the parent's unlocked-region clamp, stop the leg at the boundary
+        # of a *completed* territory the robot is about to re-enter (one it is
+        # not already standing in). This keeps legs from sailing through the
+        # finished start territory between forays, and -- because
+        # heading_preference reads clearance -- it makes directions into
+        # finished territory score as no-progress while directions into
+        # still-uncharted (frontier-bearing) territory stay open.
+        base = super().forward_distance(x, y, heading, desired_distance)
+        current = territory_cell(x, y, self.territory_mm)
+        hr = math.radians(heading)
+        ux, uy = math.cos(hr), math.sin(hr)
+        last_cell = current
+        distance = WALL_SAMPLE_MM
+        while distance <= base:
+            cell = territory_cell(
+                x + distance * ux, y + distance * uy, self.territory_mm
+            )
+            if cell != last_cell:
+                last_cell = cell
+                if cell != current and self.territory_explored(cell):
+                    return int(
+                        max(0, distance - WALL_SAMPLE_MM - WALL_CLEARANCE_MM)
+                    )
+            distance += WALL_SAMPLE_MM
+        return int(base)
 
     def territory_explored(self, cell):
         # An abandoned territory is "done" for the purpose of moving focus on.

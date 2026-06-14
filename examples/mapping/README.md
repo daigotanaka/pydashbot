@@ -490,7 +490,7 @@ regime is owned by the next step.
 `ConservativeExploration` that reflects the redefined objective directly.
 Enable it with `exploration_policy: coverage` in the config. It reuses the
 parent's territory
-constraint/unlock/expansion machinery and changes two things:
+constraint/unlock/expansion machinery and changes three things:
 
 - **Objective in `heading_preference`:** rewards the **count of new reachable,
   unvisited cells a leg would enter** (`COVERAGE_CELL_WEIGHT` per cell) instead
@@ -504,10 +504,20 @@ constraint/unlock/expansion machinery and changes two things:
   cannot. `abandoned` persists in run metadata so resumed runs don't re-trap.
   The accounting lives in `unlock_if_complete` (once per decision); the
   `heading_preference` scorer stays pure/side-effect-free.
+- **Boundary-aware forward legs:** `forward_distance` stops a leg at the
+  boundary of a *completed* territory it would re-enter (one the robot is not
+  already standing in), instead of sailing through it to the unlocked-region
+  edge. This keeps the robot from drifting back through the finished start
+  territory between forays, and — because `heading_preference` reads
+  `clearance` — a heading into finished territory then scores as no-progress
+  while a heading into still-uncharted (frontier-bearing) territory stays open.
+  Transit into uncharted neighbors is unaffected (they are not "completed").
 
 Verified on the stuck 4-run map: a focus the robot cannot enter (`(0,0)` then
 `(-1,-1)`) is abandoned after 3 legs and focus moves to fresh, reachable
-territory (`(0,-2)`) instead of re-roaming.
+territory (`(0,-2)`) instead of re-roaming. The boundary clamp addresses the
+5-minute coverage run where the finished start territory `(0,-1)` held 56 of
+108 path points as a transit hub between forays.
 
 Relevant code: `heading_score` / `choose_exploration_angle` in
 `examples/mapping/map_room.py`; `exploration_policy.py`;

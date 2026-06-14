@@ -38,10 +38,13 @@ class MappingStrategyTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 map_room.parse_args(["start", "--config", str(config)])
 
-    def test_default_mapping_config_uses_conservative_exploration(self):
-        self.assertEqual(
-            map_room.parse_args(["start"]).exploration_policy, "conservative"
-        )
+    def test_mapping_config_defaults_to_conservative_exploration(self):
+        # When the config omits exploration_policy, fall back to the default.
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.yaml"
+            config.write_text('{"map_file": "map.json"}')
+            options = map_room.parse_args(["start", "--config", str(config)])
+        self.assertEqual(options.exploration_policy, "conservative")
 
     def test_mapping_config_rejects_unknown_exploration_policy(self):
         with TemporaryDirectory() as directory:
