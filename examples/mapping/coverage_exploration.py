@@ -224,12 +224,6 @@ class CoverageExploration(ConservativeExploration):
 
     def heading_preference(self, x, y, heading):
         clearance = self.forward_distance(x, y, heading, self.territory_mm)
-        if clearance < MIN_USEFUL_FORWARD_MM:
-            return -NO_PROGRESS_PENALTY + clearance
-        if self.focus in self.abandoned:
-            # Given up on this focus: steer toward the nearest expandable frontier.
-            return self._aim_toward_expansion(x, y, heading, clearance)
-
         resolution = territory_resolution(
             self.focus,
             self.path_points,
@@ -238,12 +232,19 @@ class CoverageExploration(ConservativeExploration):
             self.territory_mm,
         )
         frontier = resolution['frontier']
-        forbidden = resolution['blocked'] | resolution['unreachable']
-        if not frontier:
-            # Focus fully explored: steer toward the nearest expandable frontier
-            # so the robot drives to a boundary where a new territory opens.
+
+        if self.focus in self.abandoned or not frontier:
+            # Nothing left in the focus: steer toward the nearest expandable
+            # frontier. Reaching a boundary means low clearance, and that is
+            # exactly what triggers expand_past_boundary -- so this case must be
+            # handled BEFORE the low-clearance no-progress penalty below, or the
+            # robot would never commit to a boundary and could never expand.
             return self._aim_toward_expansion(x, y, heading, clearance)
 
+        if clearance < MIN_USEFUL_FORWARD_MM:
+            return -NO_PROGRESS_PENALTY + clearance
+
+        forbidden = resolution['blocked'] | resolution['unreachable']
         hr = math.radians(heading)
         ux, uy = math.cos(hr), math.sin(hr)
         new_cells = set()

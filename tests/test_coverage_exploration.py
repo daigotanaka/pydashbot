@@ -165,6 +165,19 @@ class CoverageExplorationTests(unittest.TestCase):
         toward_abandoned_north = policy.heading_preference(500, -500, 90)
         self.assertGreater(toward_live_south, toward_abandoned_north)
 
+    def test_commits_to_a_boundary_to_expand_even_at_low_clearance(self):
+        # (0, -1) finished; the robot sits just inside the south boundary. The
+        # only way to expand into (0, -2) is to drive at that boundary and get
+        # pinned (low clearance). That heading must score positive, not as
+        # no-progress, or expand_past_boundary can never fire.
+        policy = CoverageExploration(
+            [], FULLY_EXPLORED_SOUTH[0], FULLY_EXPLORED_SOUTH, [], territory_mm=1000
+        )
+        self.assertTrue(policy.territory_explored((0, -1)))
+        # Near the south edge: heading south has almost no clearance.
+        self.assertLess(policy.forward_distance(500, -950, -90, 3000), 200)
+        self.assertGreater(policy.heading_preference(500, -950, -90), 0)
+
     def test_metadata_records_objective_and_abandoned(self):
         policy = CoverageExploration([], (80, -80), [], [], territory_mm=1000)
         policy.abandoned.add((9, 9))
