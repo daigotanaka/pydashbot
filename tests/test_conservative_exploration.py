@@ -310,6 +310,99 @@ class ConservativeExplorationTests(unittest.TestCase):
         self.assertFalse(policy.expand_past_boundary(500, -50, 90))
         self.assertEqual(policy.territories, [(0, 0), (0, -1)])
 
+    def test_completed_dead_end_focus_expands_from_best_explored_territory(self):
+        # (0, -1) is fully explored and reachable; the focus (0, 0) "completed"
+        # by going unreachable (3 visited, the rest blocked). Unlocking the next
+        # territory must grow from (0, -1), not march further north past (0, 0).
+        explored = [
+            (x, y)
+            for x in (125, 375, 625, 875)
+            for y in (-875, -625, -375, -125)
+        ]
+        dead_end_visited = [(125, 125), (375, 125), (625, 125)]
+        # Block every other cell of (0, 0) so it has no frontier left.
+        dead_end_blocked = [
+            (cx * 250 + 125, cy * 250 + 125)
+            for cx in range(4)
+            for cy in range(4)
+            if (cx, cy) not in {(0, 0), (1, 0), (2, 0)}
+        ]
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1], [0, 0]],
+                    "focus_territory": [0, 0],
+                }
+            }
+        ]
+        policy = conservative.ConservativeExploration(
+            runs,
+            explored[0],
+            explored + dead_end_visited,
+            dead_end_blocked,
+            territory_mm=1000,
+        )
+        self.assertTrue(
+            conservative.territory_sufficiently_mapped(
+                (0, 0), policy.path_points, policy.blockers, policy.wall_segments,
+                1000,
+            )
+        )
+
+        policy.unlock_if_complete()
+
+        north_dead_region = {(1, 0), (-1, 0), (0, 1)}
+        self.assertNotIn(policy.focus, north_dead_region)
+        self.assertIn(policy.focus, {(0, -2), (1, -1), (-1, -1)})
+
+    def test_focus_with_no_frontier_unlocks_despite_few_visited_cells(self):
+        # Reproduces the stuck run: focus (0, 0) has only 2 reachable cells (the
+        # rest unreachable behind a wall), so frontier is empty but visited < 3.
+        # It must still count as done so exploration can move on, instead of
+        # trapping focus on the dead-end forever.
+        explored = [
+            (x, y)
+            for x in (125, 375, 625, 875)
+            for y in (-875, -625, -375, -125)
+        ]
+        dead_end_visited = [(125, 125), (375, 125)]  # only 2 cells of (0, 0)
+        dead_end_blocked = [
+            (cx * 250 + 125, cy * 250 + 125)
+            for cx in range(4)
+            for cy in range(4)
+            if (cx, cy) not in {(0, 0), (1, 0)}
+        ]
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1], [0, 0]],
+                    "focus_territory": [0, 0],
+                }
+            }
+        ]
+        policy = conservative.ConservativeExploration(
+            runs,
+            explored[0],
+            explored + dead_end_visited,
+            dead_end_blocked,
+            territory_mm=1000,
+        )
+        # Strict reporting bar still treats it as not-sufficiently-mapped...
+        self.assertFalse(
+            conservative.territory_sufficiently_mapped(
+                (0, 0), policy.path_points, policy.blockers, policy.wall_segments,
+                1000,
+            )
+        )
+        # ...but it is "explored" (no reachable frontier), so unlock fires.
+        self.assertTrue(policy.territory_explored((0, 0)))
+
+        policy.unlock_if_complete()
+
+        self.assertGreater(len(policy.territories), 2)
+        self.assertNotIn(policy.focus, {(0, 0), (0, -1)})
+        self.assertNotIn(policy.focus, {(1, 0), (-1, 0), (0, 1)})
+
     def test_heading_preference_avoids_inferred_wall_segment(self):
         path = [(250, 250)]
         walls = [(500, 350), (700, 350)]

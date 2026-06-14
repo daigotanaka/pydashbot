@@ -334,11 +334,25 @@ class ConservativeExploration:
                 )
                 self.completed_territories.add(cell)
 
-    def unlock_if_complete(self):
-        if not territory_sufficiently_mapped(
-            self.focus, self.path_points, self.blockers, self.wall_segments,
+    def territory_explored(self, cell):
+        """True when nothing reachable is left to explore in ``cell``.
+
+        ``territory_sufficiently_mapped`` also requires ``MIN_VISITED_CELLS``,
+        which is the right bar for *reporting* a territory as mapped but wrong
+        for deciding when to move on: a territory that is mostly blocked or
+        unreachable (few reachable cells) has no frontier left yet never clears
+        that bar, which would trap the exploration focus on it forever. Here we
+        only require that the territory was entered and has no reachable
+        frontier remaining.
+        """
+        resolution = territory_resolution(
+            cell, self.path_points, self.blockers, self.wall_segments,
             self.territory_mm,
-        ):
+        )
+        return bool(resolution['visited']) and not resolution['frontier']
+
+    def unlock_if_complete(self):
+        if not self.territory_explored(self.focus):
             return
         adjacent_unfinished = [
             cell
@@ -346,10 +360,7 @@ class ConservativeExploration:
             if (
                 cell != self.focus
                 and abs(cell[0] - self.focus[0]) + abs(cell[1] - self.focus[1]) == 1
-                and not territory_sufficiently_mapped(
-                    cell, self.path_points, self.blockers, self.wall_segments,
-                    self.territory_mm,
-                )
+                and not self.territory_explored(cell)
             )
         ]
         if adjacent_unfinished:
@@ -365,24 +376,52 @@ class ConservativeExploration:
             )
             return
         allowed = set(self.territories)
-        candidates = [
-            cell
-            for cell in (
-                (self.focus[0] + 1, self.focus[1]),
-                (self.focus[0], self.focus[1] + 1),
-                (self.focus[0] - 1, self.focus[1]),
-                (self.focus[0], self.focus[1] - 1),
-            )
-            if cell not in allowed
-        ]
+        # Grow the explored region from ANY unlocked territory, not just the
+        # focus. A focus that completed by going unreachable (e.g. behind a
+        # wall) must not keep unlocking territories further in that dead
+        # direction. Prefer a frontier territory adjacent to the best-explored
+        # one, so expansion follows where the robot actually made progress.
+        candidates = {
+            (cell[0] + dx, cell[1] + dy)
+            for cell in self.territories
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            if (cell[0] + dx, cell[1] + dy) not in allowed
+        }
         if not candidates:
             return
+
+        def neighbor_coverage(cell):
+            return max(
+                (
+                    len(territory_coverage(
+                        neighbor, self.path_points, self.territory_mm
+                    ))
+                    for neighbor in (
+                        (cell[0] + 1, cell[1]), (cell[0] - 1, cell[1]),
+                        (cell[0], cell[1] + 1), (cell[0], cell[1] - 1),
+                    )
+                    if neighbor in allowed
+                ),
+                default=0,
+            )
+
+        # Stable final tie-break: keep the original focus-relative preference
+        # (+x, +y, -x, -y) so equal candidates resolve the same way as before.
+        direction_rank = {(1, 0): 0, (0, 1): 1, (-1, 0): 2, (0, -1): 3}
+
+        def focus_direction(cell):
+            offset = (cell[0] - self.focus[0], cell[1] - self.focus[1])
+            return direction_rank.get(offset, len(direction_rank))
+
         next_territory = min(
             candidates,
             key=lambda cell: (
                 -len(territory_coverage(cell, self.path_points, self.territory_mm)),
+                -neighbor_coverage(cell),
                 len(territory_coverage(cell, self.blockers, self.territory_mm)),
                 cell[0] ** 2 + cell[1] ** 2,
+                focus_direction(cell),
+                cell,
             ),
         )
         self.territories.append(next_territory)
@@ -420,10 +459,7 @@ class ConservativeExploration:
         territory was unlocked.
         """
         current = territory_cell(x, y, self.territory_mm)
-        if not territory_sufficiently_mapped(
-            current, self.path_points, self.blockers, self.wall_segments,
-            self.territory_mm,
-        ):
+        if not self.territory_explored(current):
             return False
         ahead = self.territory_ahead(x, y, heading)
         if ahead is None or ahead in self.territories:
