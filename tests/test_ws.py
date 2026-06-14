@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 import unittest
 
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
@@ -10,7 +11,10 @@ from dash.ws_server import (
     execute_request,
     greet_robot,
     handle_client,
+    monitor_heartbeat,
     parse_args as parse_server_args,
+    reconnect_robot,
+    robot_silence_seconds,
     say_goodbye_and_disconnect,
     silence_robot,
     stop_robot,
@@ -269,6 +273,93 @@ class WebSocketClientTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response, {"ok": True, "result": [1, "two"]})
+
+
+class HeartbeatRobot:
+    """Fake robot whose last-packet time and reconnect are controllable."""
+
+    def __init__(self, healthy=True):
+        self.healthy = healthy
+        self.reconnects = 0
+        self.on_reconnect = None
+
+    def get_dash_time(self):
+        # Fresh wall-clock time when healthy; 0 (never) when silent.
+        return time.time() if self.healthy else 0
+
+    def reconnect(self):
+        self.reconnects += 1
+        self.healthy = True
+        if self.on_reconnect:
+            self.on_reconnect()
+
+
+class HeartbeatTests(unittest.TestCase):
+    def test_silence_seconds_reports_inf_when_never_seen_or_failing(self):
+        class NeverSeen:
+            def get_dash_time(self):
+                return 0
+
+        class Failing:
+            def get_dash_time(self):
+                raise RuntimeError("ble dropped")
+
+        self.assertEqual(robot_silence_seconds(NeverSeen()), float("inf"))
+        self.assertEqual(robot_silence_seconds(Failing()), float("inf"))
+
+    def test_silence_seconds_measures_time_since_last_packet(self):
+        class SeenAt:
+            def __init__(self, when):
+                self.when = when
+
+            def get_dash_time(self):
+                return self.when
+
+        self.assertLess(robot_silence_seconds(SeenAt(time.time())), 1.0)
+        self.assertGreater(robot_silence_seconds(SeenAt(time.time() - 100)), 50)
+
+    def test_reconnect_robot_reports_success_and_failure(self):
+        lock = threading.Lock()
+        robot = HeartbeatRobot()
+        self.assertTrue(reconnect_robot(robot, lock))
+        self.assertEqual(robot.reconnects, 1)
+
+        def boom():
+            raise RuntimeError("ble down")
+
+        robot.reconnect = boom
+        self.assertFalse(reconnect_robot(robot, lock))
+
+
+class HeartbeatLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconnects_after_max_missed_heartbeats(self):
+        stop = asyncio.Event()
+        robot = HeartbeatRobot(healthy=False)  # silent from the start
+        robot.on_reconnect = stop.set  # end the loop once it recovers
+
+        await asyncio.wait_for(
+            monitor_heartbeat(
+                robot, threading.Lock(), stop, interval=0.01, max_misses=2
+            ),
+            timeout=2,
+        )
+        self.assertEqual(robot.reconnects, 1)
+
+    async def test_healthy_robot_is_never_reconnected(self):
+        stop = asyncio.Event()
+        robot = HeartbeatRobot(healthy=True)
+
+        async def shutdown_soon():
+            await asyncio.sleep(0.1)
+            stop.set()
+
+        await asyncio.gather(
+            monitor_heartbeat(
+                robot, threading.Lock(), stop, interval=0.01, max_misses=2
+            ),
+            shutdown_soon(),
+        )
+        self.assertEqual(robot.reconnects, 0)
 
 
 if __name__ == "__main__":

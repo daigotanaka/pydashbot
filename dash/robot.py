@@ -38,6 +38,14 @@ class Robot(CommonActuators):
             await self.client.disconnect()
             logging.info(f"Disconnected from {self.address}")
 
+    async def reconnect(self):
+        """Tear down a dropped link and connect again, restarting sensors."""
+        try:
+            await self.disconnect()
+        except Exception as error:
+            logging.warning(f"Error tearing down stale connection: {error}")
+        await self.connect()
+
 
     async def command(self, command_name, command_values):  # Use `self` instead of `client`
             if self.client.is_connected:  # Access `is_connected` through `self.client`

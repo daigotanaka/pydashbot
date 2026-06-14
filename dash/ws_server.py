@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import threading
+import time
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
@@ -18,6 +19,14 @@ from dash.robot import DEFAULT_ROBOT_NAME
 HOST = "127.0.0.1"
 PORT = 8765
 PID_PATH = "/tmp/dash_robot_ws.pid"
+
+# Liveness check: the sensor stream stamps `dash_time` with the wall-clock time
+# of each packet, so seconds-since-`dash_time` is how long the robot has been
+# silent. A heartbeat polls it every HEARTBEAT_INTERVAL_S; after
+# HEARTBEAT_MAX_MISSES consecutive intervals with no packet, the link is treated
+# as lost and a reconnect is attempted.
+HEARTBEAT_INTERVAL_S = 15
+HEARTBEAT_MAX_MISSES = 2
 
 
 def parse_args(args=None):
@@ -111,6 +120,73 @@ async def handle_client(websocket, robot, command_lock):
         await asyncio.to_thread(stop_robot, robot, command_lock)
 
 
+def robot_silence_seconds(robot):
+    """Seconds since the robot's last sensor packet (its heartbeat).
+
+    Returns ``inf`` when no packet has ever arrived or the sensor read fails
+    (for example mid-reconnect), so those count as a missed heartbeat.
+    """
+    try:
+        last_packet = robot.get_dash_time()
+    except Exception:
+        return float("inf")
+    if not last_packet:
+        return float("inf")
+    return max(0.0, time.time() - last_packet)
+
+
+def reconnect_robot(robot, command_lock):
+    """Re-establish a dropped BLE link, holding the command lock."""
+    with command_lock:
+        try:
+            robot.reconnect()
+        except Exception as error:
+            print(f"Robot reconnect failed: {error}", flush=True)
+            return False
+    return True
+
+
+async def monitor_heartbeat(
+    robot,
+    command_lock,
+    stop,
+    interval=HEARTBEAT_INTERVAL_S,
+    max_misses=HEARTBEAT_MAX_MISSES,
+):
+    """Poll the robot's heartbeat and reconnect after repeated misses."""
+    misses = 0
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return  # shutdown requested
+        except asyncio.TimeoutError:
+            pass
+
+        silence = await asyncio.to_thread(robot_silence_seconds, robot)
+        if silence < interval:
+            if misses:
+                print("Robot heartbeat recovered.", flush=True)
+            misses = 0
+            continue
+
+        misses += 1
+        print(
+            f"Robot heartbeat missed ({misses}/{max_misses}); "
+            f"no sensor data for {silence:.0f}s.",
+            flush=True,
+        )
+        if misses < max_misses:
+            continue
+
+        print("Robot connection lost; attempting to reconnect...", flush=True)
+        if await asyncio.to_thread(reconnect_robot, robot, command_lock):
+            print("Robot reconnected.", flush=True)
+            misses = 0
+        else:
+            # Stay tripped so the next interval retries the reconnect.
+            misses = max_misses
+
+
 async def run_server(robot, host=HOST, port=PORT):
     stop = asyncio.Event()
     command_lock = threading.Lock()
@@ -119,13 +195,21 @@ async def run_server(robot, host=HOST, port=PORT):
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
 
-    async with serve(
-        lambda websocket: handle_client(websocket, robot, command_lock),
-        host,
-        port,
-    ):
-        print(f"Robot WebSocket server ready on ws://{host}:{port}", flush=True)
-        await stop.wait()
+    heartbeat = asyncio.create_task(monitor_heartbeat(robot, command_lock, stop))
+    try:
+        async with serve(
+            lambda websocket: handle_client(websocket, robot, command_lock),
+            host,
+            port,
+        ):
+            print(f"Robot WebSocket server ready on ws://{host}:{port}", flush=True)
+            await stop.wait()
+    finally:
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
 
 
 def main():
