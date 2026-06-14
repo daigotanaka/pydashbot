@@ -43,9 +43,10 @@ class CoverageExplorationTests(unittest.TestCase):
             policy.unlock_if_complete()
 
         self.assertIn((0, 0), policy.abandoned)
-        self.assertNotEqual(policy.focus, (0, 0))
-        # It moved on toward the explored region, not deeper into the dead north.
-        self.assertNotIn(policy.focus, {(1, 0), (-1, 0), (0, 1)})
+        # Territory creation is position-driven (expand_past_boundary), so a
+        # stalled focus must NOT abstractly unlock new (likely unreachable)
+        # territories -- that runaway is what trapped the robot.
+        self.assertEqual(policy.territories, [(0, -1), (0, 0)])
 
     def test_resets_stall_when_focus_gains_a_cell(self):
         runs = [
@@ -123,6 +124,46 @@ class CoverageExplorationTests(unittest.TestCase):
         into_completed = policy.heading_preference(500, -1100, 90)   # north into (0,-1)
         into_uncharted = policy.heading_preference(500, -1100, -90)  # south, stays in (0,-2)
         self.assertGreater(into_uncharted, into_completed)
+
+    def test_does_not_unlock_new_territories_abstractly(self):
+        # Both unlocked territories are finished and there is no adjacent
+        # unfinished one; coverage must not abstractly grow the territory set
+        # (that is left to position-driven expand_past_boundary).
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1], [0, 0]],
+                    "focus_territory": [0, 0],
+                }
+            }
+        ]
+        both_filled = FULLY_EXPLORED_SOUTH + [
+            (cx * 250 + 125, cy * 250 + 125)
+            for cx in range(4)
+            for cy in range(4)
+        ]
+        policy = CoverageExploration(
+            runs, FULLY_EXPLORED_SOUTH[0], both_filled, [], territory_mm=1000
+        )
+        before = list(policy.territories)
+
+        policy.unlock_if_complete()
+
+        self.assertEqual(policy.territories, before)
+
+    def test_aims_toward_live_frontier_not_abandoned_direction(self):
+        # (0, -1) fully explored and is the focus; nothing left to gain there.
+        # With north (0, 0) given up, heading from the center toward the live
+        # south frontier (0, -2) must beat heading toward the abandoned north.
+        policy = CoverageExploration(
+            [], FULLY_EXPLORED_SOUTH[0], FULLY_EXPLORED_SOUTH, [], territory_mm=1000
+        )
+        self.assertTrue(policy.territory_explored((0, -1)))
+        policy.abandoned.add((0, 0))
+
+        toward_live_south = policy.heading_preference(500, -500, -90)
+        toward_abandoned_north = policy.heading_preference(500, -500, 90)
+        self.assertGreater(toward_live_south, toward_abandoned_north)
 
     def test_metadata_records_objective_and_abandoned(self):
         policy = CoverageExploration([], (80, -80), [], [], territory_mm=1000)

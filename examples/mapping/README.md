@@ -489,8 +489,7 @@ regime is owned by the next step.
 `coverage_exploration.py` adds `CoverageExploration`, a subclass of
 `ConservativeExploration` that reflects the redefined objective directly.
 Enable it with `exploration_policy: coverage` in the config. It reuses the
-parent's territory
-constraint/unlock/expansion machinery and changes three things:
+parent's territory constraint machinery and changes four things:
 
 - **Objective in `heading_preference`:** rewards the **count of new reachable,
   unvisited cells a leg would enter** (`COVERAGE_CELL_WEIGHT` per cell) instead
@@ -512,12 +511,22 @@ constraint/unlock/expansion machinery and changes three things:
   `clearance` — a heading into finished territory then scores as no-progress
   while a heading into still-uncharted (frontier-bearing) territory stays open.
   Transit into uncharted neighbors is unaffected (they are not "completed").
+- **Position-driven territory creation.** `_unlock_new_territory` is overridden
+  to a no-op, so the policy never unlocks a territory *abstractly*. New
+  territories are created only by `expand_past_boundary` — when the robot is
+  physically pinned at a boundary heading into un-unlocked space. When the focus
+  is finished, `heading_preference` steers toward the nearest **expandable**
+  frontier (an un-unlocked, non-abandoned neighbor of the explored region), so
+  the robot drives to a real boundary and opens the next territory there.
 
-Verified on the stuck 4-run map: a focus the robot cannot enter (`(0,0)` then
-`(-1,-1)`) is abandoned after 3 legs and focus moves to fresh, reachable
-territory (`(0,-2)`) instead of re-roaming. The boundary clamp addresses the
-5-minute coverage run where the finished start territory `(0,-1)` held 56 of
-108 path points as a transit hub between forays.
+Why position-driven: abstract unlocking (the parent's behavior) plus premature
+abandonment plus the boundary clamp interact catastrophically — a focus the
+robot has not yet reached gets abandoned, the clamp then walls it off, the next
+abstract unlock picks another unreachable direction, and the cascade traps the
+robot in the start territory while spawning a dozen unreachable territories
+(observed: 16 unlocked / 12 abandoned, robot stuck in `(0,-1)`). Creating
+territories only where the robot actually reaches a boundary keeps the unlocked
+set equal to what has been physically visited or directly attempted.
 
 Relevant code: `heading_score` / `choose_exploration_angle` in
 `examples/mapping/map_room.py`; `exploration_policy.py`;

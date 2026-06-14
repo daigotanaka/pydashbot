@@ -377,6 +377,16 @@ class ConservativeExploration(ExplorationPolicy):
                 f'focus to {self.focus}'
             )
             return
+        self._unlock_new_territory()
+
+    def _unlock_new_territory(self):
+        """Unlock a fresh territory to grow the explored region.
+
+        Grows from ANY unlocked territory, not just the focus, preferring a
+        frontier adjacent to the best-explored one. Subclasses may override this
+        (e.g. to create territories only where the robot physically reaches a
+        boundary, rather than abstractly).
+        """
         allowed = set(self.territories)
         # Grow the explored region from ANY unlocked territory, not just the
         # focus. A focus that completed by going unreachable (e.g. behind a

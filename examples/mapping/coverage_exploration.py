@@ -141,9 +141,60 @@ class CoverageExploration(ConservativeExploration):
 
     def unlock_if_complete(self):
         # Runs once per turn decision. Account for progress first so a focus the
-        # robot cannot enter is abandoned, then let the parent reselect/expand.
+        # robot cannot enter is abandoned, then let the parent reselect focus.
         self._note_progress()
         super().unlock_if_complete()
+
+    def _unlock_new_territory(self):
+        # Coverage creates territories only where the robot physically reaches a
+        # boundary (expand_past_boundary), never abstractly. Abstract unlocking
+        # cascades into territories the robot cannot reach once a focus stalls,
+        # and -- with the boundary clamp -- walls the robot into the start
+        # territory. Leaving focus put lets heading_preference steer toward the
+        # nearest expandable frontier instead.
+        return
+
+    def _expansion_targets(self):
+        """Un-unlocked territories adjacent to the explored region.
+
+        These are where ``expand_past_boundary`` can open the next territory, so
+        when the focus has nothing left the robot should head toward the nearest
+        one. Abandoned territories and their re-entry are excluded.
+        """
+        allowed = set(self.territories)
+        targets = set()
+        for cell in self.territories:
+            if cell in self.abandoned:
+                continue
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                neighbor = (cell[0] + dx, cell[1] + dy)
+                if neighbor not in allowed and neighbor not in self.abandoned:
+                    targets.add(neighbor)
+        return targets
+
+    def _aim_toward_expansion(self, x, y, heading, clearance):
+        """Score a heading by how well it points at the nearest expandable frontier.
+
+        Used when the focus territory has nothing left to gain: steer the robot
+        toward un-unlocked space so it reaches a boundary and the next territory
+        is opened there, rather than drifting on bare clearance back through
+        finished territory.
+        """
+        targets = self._expansion_targets()
+        if not targets:
+            return clearance
+        hr = math.radians(heading)
+        ux, uy = math.cos(hr), math.sin(hr)
+        centers = [
+            ((c[0] + 0.5) * self.territory_mm, (c[1] + 0.5) * self.territory_mm)
+            for c in targets
+        ]
+        best_alignment = max(
+            ((tx - x) * ux + (ty - y) * uy) / math.hypot(tx - x, ty - y)
+            for tx, ty in centers
+            if math.hypot(tx - x, ty - y) > 0
+        )
+        return best_alignment * FRONTIER_HEADING_WEIGHT + min(clearance, self.grid_mm)
 
     def _note_progress(self):
         if self.focus != self._tracked_focus:
@@ -176,8 +227,8 @@ class CoverageExploration(ConservativeExploration):
         if clearance < MIN_USEFUL_FORWARD_MM:
             return -NO_PROGRESS_PENALTY + clearance
         if self.focus in self.abandoned:
-            # Don't be tugged toward a territory we've given up reaching.
-            return clearance
+            # Given up on this focus: steer toward the nearest expandable frontier.
+            return self._aim_toward_expansion(x, y, heading, clearance)
 
         resolution = territory_resolution(
             self.focus,
@@ -189,8 +240,9 @@ class CoverageExploration(ConservativeExploration):
         frontier = resolution['frontier']
         forbidden = resolution['blocked'] | resolution['unreachable']
         if not frontier:
-            # Focus exhausted; unlock_if_complete will move focus on next turn.
-            return clearance
+            # Focus fully explored: steer toward the nearest expandable frontier
+            # so the robot drives to a boundary where a new territory opens.
+            return self._aim_toward_expansion(x, y, heading, clearance)
 
         hr = math.radians(heading)
         ux, uy = math.cos(hr), math.sin(hr)
