@@ -321,48 +321,6 @@ Safety constraints honored by the implementation:
   trustworthy.
 - Avoid repeatedly commanding motion into the same blocked segment.
 
-### Next Challenge: Local Detour Exploration
-
-The planner reroutes only through space it has already proven. When every known
-route is blocked it stops. A future implementation could perform bounded local
-exploration to discover a new connection around an obstruction, while always
-preserving a proven retreat route back to known-safe space.
-
-### Next Challenge: Path-Aware Obstacle Handling on the Way Home
-
-Dash's obstacle sensing for forward motion only looks ahead (the left and right
-proximity sensors; see `_obstacle_in_path` in `dash/motion.py`). A wall that sat
-behind Dash during outbound travel becomes a wall directly ahead after the turn
-home, even though Dash already traversed that space. Go-home currently mitigates
-this with blunt, geometry-free heuristics — a relaxed proximity threshold and
-confirmation streak while retracing, a clearance nudge after a near-reversal
-turn, and accepting a near-home obstacle as arrival. These help, but they trade
-away safety margin uniformly rather than reasoning about what the obstacle is.
-
-The remaining work is to make the obstacle handling *path-aware*: distinguish a
-*known* wall already in the map near the proven segment from a *new* unmapped
-obstacle. Compare the triggering stop position (the halt outcome carries the
-exact prox readings and stop position) against `run['walls']` along the current
-leg. If the detected wall coincides with a mapped wall on a segment Dash already
-traversed, continue at normal sensitivity; otherwise stop as today. This would
-let go-home keep full obstacle sensitivity for genuinely new obstructions while
-no longer halting on walls it has already proven passable — replacing the blunt
-relaxation with a principled decision.
-
-Safety constraints:
-
-- Never disable tilt stopping.
-- Always stop for new or unmapped obstacles, and for anything not on the proven
-  path.
-- Keep obstacle-aware movement enabled; do not blanket-disable forward detection.
-- Continue recording genuinely blocked segments as blocked edges.
-
-Relevant code: `go_home` (the move loop, `needs_wall_clearance`,
-`obstacle_arrival_near_home`) and `describe_halt` in
-`examples/mapping/map_room.py`; `move()`, `_obstacle_in_path`, and the
-`PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
-list in the room-map JSON.
-
 ### Legacy Strategy: Blocked Edges Over-Block Parallel Proven Corridors
 
 The optional `hard-blocked-edge` strategy preserves the original planner for
@@ -373,7 +331,7 @@ this by applying localized directional costs instead of hard exclusions.
 Relevant code: `HardBlockedEdgeStrategy` and `DStarLiteStrategy` in
 `examples/mapping/go_home_strategies.py`.
 
-### Conservative Exploration
+## Conservative Exploration
 
 The mapper limits exploration to an initial square territory (1 x 1 meter by
 default; change `territory_size_mm` in the config). When a forward leg
@@ -532,7 +490,112 @@ Relevant code: `heading_score` / `choose_exploration_angle` in
 `examples/mapping/map_room.py`; `exploration_policy.py`;
 `conservative_exploration.py`; `coverage_exploration.py`.
 
-### Next Challenge: A Better Retry Planner
+## Next Challenges
+
+This section is the single list of current mapping and navigation challenges.
+Completed behavior and historical design decisions remain documented in their
+respective sections above.
+
+### Reliable Territory Expansion
+
+The current mapping-efficiency challenge is the transition from finishing one
+territory to unlocking the next. In the latest captured run, Dash visited all
+16 cells of the start territory but unlocked no adjacent territory. It then
+spent the rest of the run approaching and retreating from the four boundaries.
+Physical walls stopped several approaches, but the policy neither committed to
+one possible expansion long enough to prove it nor remembered which attempted
+routes had failed. The final state still treated all four adjacent territories
+as expansion targets.
+
+The next iteration should make territory expansion an explicit, persistent
+process:
+
+1. **Commit to one territory expansion.** After the current territory is
+   explored, choose one adjacent territory as the active expansion target and
+   keep pursuing it until Dash either crosses the shared boundary or determines
+   that no plausible crossing remains. Do not score every heading against
+   whichever adjacent territory happens to align best on that turn.
+2. **Approach a plausible crossing area.** Aim for an open area along the shared
+   boundary rather than the adjacent territory's center. Prefer crossing areas
+   away from known physical walls, and continue refining the approach as new
+   wall observations arrive.
+3. **Learn from physical blockage.** A wall or obstacle encountered during an
+   active expansion should eliminate the attempted crossing area. One blocked
+   point must not reject the whole adjacent territory; mark the territory
+   expansion blocked only after no plausible crossing area remains. Preserve
+   blocked territory expansions across resumed runs so Dash does not repeat
+   exhausted attempts.
+4. **Separate physical blockage from the mental boundary.** Reaching the
+   invisible territory boundary from a fully explored territory should unlock
+   the territory ahead. Hitting a physical wall before reaching that boundary
+   should update the active expansion attempt instead of unlocking or silently
+   returning it to the candidate pool.
+5. **Conclude coverage when expansion is exhausted.** When every unlocked
+   territory is explored and no open territory expansion remains, report
+   coverage complete instead of driving until the time limit. A blocked
+   expansion may be reconsidered later only if new map knowledge reveals a
+   plausible crossing.
+
+At a high level, the resulting flow is:
+
+```text
+explore current territory
+→ get open territory expansions
+→ select and pursue one expansion
+→ cross the mental boundary: unlock and explore the adjacent territory
+→ hit physical blockage: eliminate that crossing area and try another
+→ no plausible crossings remain: add blocked territory expansion
+→ no open expansions remain: conclude coverage
+```
+
+Use simple collection-oriented terminology for the expansion state, such as
+`get_territory_expansions` and `add_blocked_territory_expansion`. A blocked
+territory expansion represents a directed route from one territory to its
+neighbor, not a claim that the neighbor is unreachable from every direction.
+
+### Local Detour Exploration
+
+The planner reroutes only through space it has already proven. When every known
+route is blocked it stops. A future implementation could perform bounded local
+exploration to discover a new connection around an obstruction, while always
+preserving a proven retreat route back to known-safe space.
+
+### Path-Aware Obstacle Handling On The Way Home
+
+Dash's obstacle sensing for forward motion only looks ahead (the left and right
+proximity sensors; see `_obstacle_in_path` in `dash/motion.py`). A wall that sat
+behind Dash during outbound travel becomes a wall directly ahead after the turn
+home, even though Dash already traversed that space. Go-home currently mitigates
+this with blunt, geometry-free heuristics — a relaxed proximity threshold and
+confirmation streak while retracing, a clearance nudge after a near-reversal
+turn, and accepting a near-home obstacle as arrival. These help, but they trade
+away safety margin uniformly rather than reasoning about what the obstacle is.
+
+The remaining work is to make the obstacle handling *path-aware*: distinguish a
+*known* wall already in the map near the proven segment from a *new* unmapped
+obstacle. Compare the triggering stop position (the halt outcome carries the
+exact prox readings and stop position) against `run['walls']` along the current
+leg. If the detected wall coincides with a mapped wall on a segment Dash already
+traversed, continue at normal sensitivity; otherwise stop as today. This would
+let go-home keep full obstacle sensitivity for genuinely new obstructions while
+no longer halting on walls it has already proven passable — replacing the blunt
+relaxation with a principled decision.
+
+Safety constraints:
+
+- Never disable tilt stopping.
+- Always stop for new or unmapped obstacles, and for anything not on the proven
+  path.
+- Keep obstacle-aware movement enabled; do not blanket-disable forward detection.
+- Continue recording genuinely blocked segments as blocked edges.
+
+Relevant code: `go_home` (the move loop, `needs_wall_clearance`,
+`obstacle_arrival_near_home`) and `describe_halt` in
+`examples/mapping/map_room.py`; `move()`, `_obstacle_in_path`, and the
+`PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
+list in the room-map JSON.
+
+### Better Retry Planning
 
 The D* Lite strategy now applies localized soft costs and keeps blocked proven
 corridors available as a last resort. The remaining retry problem is physical:
