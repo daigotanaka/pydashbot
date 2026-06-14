@@ -179,6 +179,25 @@ class ConservativeExplorationTests(unittest.TestCase):
             )
         )
 
+    def test_nearby_wall_does_not_cut_off_reachable_neighbor(self):
+        # Regression from data/room_map.json: this short wall segment is wholly
+        # inside neighboring cell (2, 3). It is close enough for conservative
+        # motion avoidance, but it does not separate visited (1, 3) from (1, 2).
+        wall_segments = [
+            ((510.9, -1176.9), (542.7, -1079.2)),
+        ]
+        resolution = conservative.territory_resolution(
+            (0, -2),
+            [(375, -1125)],
+            [(625, -1125)],
+            wall_segments,
+            territory_mm=1000,
+        )
+
+        self.assertIn((1, 2), resolution["frontier"])
+        self.assertIn((2, 2), resolution["frontier"])
+        self.assertIn((1, 1), resolution["frontier"])
+
     def test_wall_samples_resolve_cells_behind_wall_and_unlock_south(self):
         bottom_row = [(x, 250) for x in (250, 750, 1250, 1750)]
         south_path = [(750, -250)]

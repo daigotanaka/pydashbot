@@ -1,3 +1,4 @@
+import math
 import unittest
 
 from examples.mapping import conservative_exploration as conservative
@@ -67,6 +68,41 @@ class CoverageExplorationTests(unittest.TestCase):
         policy.unlock_if_complete()
         self.assertEqual(policy._stall_legs, 0)
         self.assertNotIn((0, -1), policy.abandoned)
+
+    def test_does_not_abandon_a_physically_entered_territory(self):
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -2]],
+                    "focus_territory": [0, -2],
+                }
+            }
+        ]
+        path = [(375, -1125)]
+        policy = CoverageExploration(runs, path[0], path, [], territory_mm=1000)
+
+        for _ in range(STALL_LEGS + 1):
+            policy.unlock_if_complete()
+
+        self.assertNotIn((0, -2), policy.abandoned)
+
+    def test_resume_reconsiders_abandoned_territory_that_was_entered(self):
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -2]],
+                    "focus_territory": [0, -2],
+                    "abandoned": [[0, -2]],
+                }
+            }
+        ]
+
+        policy = CoverageExploration(
+            runs, (375, -1125), [(375, -1125)], [], territory_mm=1000
+        )
+
+        self.assertNotIn((0, -2), policy.abandoned)
+        self.assertFalse(policy.territory_explored((0, -2)))
 
     def test_heading_preference_prefers_entering_a_new_cell(self):
         # Two cells visited along the south edge; the cell to the north is a
@@ -153,37 +189,155 @@ class CoverageExplorationTests(unittest.TestCase):
 
     def test_aims_toward_live_frontier_not_abandoned_direction(self):
         # (0, -1) fully explored and is the focus; nothing left to gain there.
-        # With north (0, 0) given up, heading from the center toward the live
-        # south frontier (0, -2) must beat heading toward the abandoned north.
+        # With north (0, 0) given up, the selected expansion must be live and
+        # its crossing heading must beat the opposite direction.
         policy = CoverageExploration(
             [], FULLY_EXPLORED_SOUTH[0], FULLY_EXPLORED_SOUTH, [], territory_mm=1000
         )
         self.assertTrue(policy.territory_explored((0, -1)))
         policy.abandoned.add((0, 0))
+        policy.unlock_if_complete()
 
-        toward_live_south = policy.heading_preference(500, -500, -90)
-        toward_abandoned_north = policy.heading_preference(500, -500, 90)
-        self.assertGreater(toward_live_south, toward_abandoned_north)
+        self.assertNotEqual(policy.active_territory_expansion[1], (0, 0))
+        x, y = 500, -500
+        tx, ty = policy.active_expansion_crossing
+        toward_active = math.degrees(math.atan2(ty - y, tx - x))
+        self.assertGreater(
+            policy.heading_preference(x, y, toward_active),
+            policy.heading_preference(x, y, toward_active + 180),
+        )
 
     def test_commits_to_a_boundary_to_expand_even_at_low_clearance(self):
         # (0, -1) finished; the robot sits just inside the south boundary. The
         # only way to expand into (0, -2) is to drive at that boundary and get
         # pinned (low clearance). That heading must score positive, not as
         # no-progress, or expand_past_boundary can never fire.
+        path = list(FULLY_EXPLORED_SOUTH) + [(875, -950)]
         policy = CoverageExploration(
-            [], FULLY_EXPLORED_SOUTH[0], FULLY_EXPLORED_SOUTH, [], territory_mm=1000
+            [], path[0], path, [], territory_mm=1000
         )
         self.assertTrue(policy.territory_explored((0, -1)))
+        policy.blocked_territory_expansions.update({
+            ((0, -1), (-1, -1)),
+            ((0, -1), (0, 0)),
+            ((0, -1), (1, -1)),
+        })
+        policy.unlock_if_complete()
+        self.assertEqual(
+            policy.active_territory_expansion, ((0, -1), (0, -2))
+        )
         # Near the south edge: heading south has almost no clearance.
-        self.assertLess(policy.forward_distance(500, -950, -90, 3000), 200)
-        self.assertGreater(policy.heading_preference(500, -950, -90), 0)
+        self.assertLess(policy.forward_distance(875, -950, -90, 3000), 200)
+        self.assertGreater(policy.heading_preference(875, -950, -90), 0)
+
+    def test_physical_stop_eliminates_one_crossing_without_blocking_expansion(self):
+        policy = CoverageExploration(
+            [], FULLY_EXPLORED_SOUTH[0], list(FULLY_EXPLORED_SOUTH), [],
+            territory_mm=1000,
+        )
+        policy.blocked_territory_expansions.update({
+            ((0, -1), (-1, -1)),
+            ((0, -1), (0, 0)),
+            ((0, -1), (1, -1)),
+        })
+        policy.unlock_if_complete()
+        expansion = policy.active_territory_expansion
+        crossing = policy.active_expansion_crossing
+
+        policy.blockers.append(crossing)
+        policy.add_blocked_territory_expansion(crossing[0], -850, -90)
+
+        self.assertNotIn(expansion, policy.blocked_territory_expansions)
+        self.assertEqual(policy.active_territory_expansion, expansion)
+        self.assertNotEqual(policy.active_expansion_crossing, crossing)
+
+    def test_blocks_expansion_after_every_crossing_is_physically_blocked(self):
+        policy = CoverageExploration(
+            [], FULLY_EXPLORED_SOUTH[0], list(FULLY_EXPLORED_SOUTH), [],
+            territory_mm=1000,
+        )
+        policy.blocked_territory_expansions.update({
+            ((0, -1), (-1, -1)),
+            ((0, -1), (0, 0)),
+            ((0, -1), (1, -1)),
+        })
+        policy.unlock_if_complete()
+        expansion = policy.active_territory_expansion
+        crossings = policy._territory_expansion_crossings(*expansion)
+        policy.blockers.extend(crossings)
+
+        policy.add_blocked_territory_expansion(500, -850, -90)
+
+        self.assertIn(expansion, policy.blocked_territory_expansions)
+        self.assertIsNone(policy.active_territory_expansion)
+        self.assertTrue(policy.is_complete())
+
+    def test_active_and_blocked_expansions_persist_across_runs(self):
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1]],
+                    "focus_territory": [0, -1],
+                    "active_territory_expansion": [[0, -1], [0, -2]],
+                    "blocked_territory_expansions": [
+                        [[0, -1], [-1, -1]],
+                    ],
+                }
+            }
+        ]
+        policy = CoverageExploration(
+            runs, FULLY_EXPLORED_SOUTH[0], list(FULLY_EXPLORED_SOUTH), [],
+            territory_mm=1000,
+        )
+
+        policy.unlock_if_complete()
+
+        self.assertEqual(
+            policy.active_territory_expansion, ((0, -1), (0, -2))
+        )
+        self.assertIn(
+            ((0, -1), (-1, -1)), policy.blocked_territory_expansions
+        )
+
+    def test_active_expansion_unlocks_the_selected_territory(self):
+        path = list(FULLY_EXPLORED_SOUTH) + [(875, -950)]
+        policy = CoverageExploration([], path[0], path, [], territory_mm=1000)
+        policy.blocked_territory_expansions.update({
+            ((0, -1), (-1, -1)),
+            ((0, -1), (0, 0)),
+            ((0, -1), (1, -1)),
+        })
+        policy.unlock_if_complete()
+
+        self.assertTrue(policy.expand_past_boundary(875, -950, -90))
+        self.assertIn((0, -2), policy.territories)
+        self.assertEqual(policy.focus, (0, -2))
+        self.assertIsNone(policy.active_territory_expansion)
+
+    def test_coverage_complete_when_every_boundary_crossing_is_blocked(self):
+        policy = CoverageExploration(
+            [], FULLY_EXPLORED_SOUTH[0], list(FULLY_EXPLORED_SOUTH), [],
+            territory_mm=1000,
+        )
+        expansions = policy.get_territory_expansions()
+        for expansion in expansions:
+            policy.blockers.extend(policy._territory_expansion_crossings(*expansion))
+
+        self.assertTrue(policy.is_complete())
 
     def test_metadata_records_objective_and_abandoned(self):
         policy = CoverageExploration([], (80, -80), [], [], territory_mm=1000)
         policy.abandoned.add((9, 9))
+        policy.blocked_territory_expansions.add(((0, -1), (0, -2)))
         meta = policy.metadata()
         self.assertEqual(meta['objective'], 'coverage')
         self.assertIn([9, 9], [list(cell) for cell in meta['abandoned']])
+        self.assertIn(
+            [[0, -1], [0, -2]],
+            [[list(source), list(target)] for source, target in meta[
+                'blocked_territory_expansions'
+            ]],
+        )
 
 
 if __name__ == "__main__":

@@ -373,7 +373,10 @@ distance to the cell size keeps wall inference at the same scale as the
 reachability grid, so a smaller territory links walls more finely. These
 inferred segments prevent repeated sampling between nearby observations, but
 remain planning-only evidence and are never added to the JSON `walls` points.
-Conservative reachability consumes the same shared segments when enabled.
+Conservative reachability consumes the same shared segments when enabled, but
+uses a narrower clearance than motion avoidance. Motion planning keeps 150 mm
+away from a wall for safety; reachability uses 100 mm because a wall merely
+near a connection between cell centers does not necessarily separate the cells.
 
 The mapper reports major progress to stdout with `[cell complete]`,
 `[territory complete]`, and `[adjacent territory unlocked]` messages. Territory
@@ -447,20 +450,20 @@ regime is owned by the next step.
 `coverage_exploration.py` adds `CoverageExploration`, a subclass of
 `ConservativeExploration` that reflects the redefined objective directly.
 Enable it with `exploration_policy: coverage` in the config. It reuses the
-parent's territory constraint machinery and changes four things:
+parent's territory constraint machinery and changes six things:
 
 - **Objective in `heading_preference`:** rewards the **count of new reachable,
   unvisited cells a leg would enter** (`COVERAGE_CELL_WEIGHT` per cell) instead
   of the parent's alignment-to-nearest-frontier heuristic, with a weak
   alignment fallback when no new cell is reachable this leg.
-- **Stateful no-progress signal:** a focus that gains no new cells over
-  `STALL_LEGS` (3) turn decisions is added to `abandoned`, relinquished, and
-  reselected. This catches the **unreachable-in-practice** case (visited = 0,
-  cells stay `frontier` because reachability needs a visited seed) that the
+- **Stateful no-progress signal:** a focus that remains physically unentered
+  after `STALL_LEGS` (3) turn decisions is added to `abandoned`, relinquished,
+  and reselected. This catches the **unreachable-in-practice** case (visited =
+  0, cells stay `frontier` because reachability needs a visited seed) that the
   exhausted-focus rule (`territory_explored`, visited ≥ 1 and frontier = 0)
-  cannot. `abandoned` persists in run metadata so resumed runs don't re-trap.
-  The accounting lives in `unlock_if_complete` (once per decision); the
-  `heading_preference` scorer stays pure/side-effect-free.
+  cannot. A territory with any visited cell is never abandoned; normal
+  reachability owns it. `abandoned` persists in run metadata, and stale
+  abandonment is discarded on resume if the territory was later entered.
 - **Boundary-aware forward legs:** `forward_distance` stops a leg at the
   boundary of a *completed* territory it would re-enter (one the robot is not
   already standing in), instead of sailing through it to the unlocked-region
@@ -472,10 +475,18 @@ parent's territory constraint machinery and changes four things:
 - **Position-driven territory creation.** `_unlock_new_territory` is overridden
   to a no-op, so the policy never unlocks a territory *abstractly*. New
   territories are created only by `expand_past_boundary` — when the robot is
-  physically pinned at a boundary heading into un-unlocked space. When the focus
-  is finished, `heading_preference` steers toward the nearest **expandable**
-  frontier (an un-unlocked, non-abandoned neighbor of the explored region), so
-  the robot drives to a real boundary and opens the next territory there.
+  physically pinned at a boundary heading into un-unlocked space.
+- **Committed territory expansion.** After finishing a territory, the policy
+  selects one directed territory expansion and one plausible crossing area on
+  the shared boundary. It keeps pursuing that expansion across turns and
+  resumed runs instead of rewarding whichever adjacent territory happens to
+  align with each candidate heading.
+- **Physical-blockage learning and completion.** A wall or obstacle encountered
+  during expansion removes the attempted crossing area. The directed expansion
+  is marked blocked only after no plausible crossing remains, and blocked
+  expansions persist across runs. When every unlocked territory is explored
+  and no open expansion remains, coverage ends instead of driving until the
+  time limit.
 
 Why position-driven: abstract unlocking (the parent's behavior) plus premature
 abandonment plus the boundary clamp interact catastrophically — a focus the
@@ -495,63 +506,6 @@ Relevant code: `heading_score` / `choose_exploration_angle` in
 This section is the single list of current mapping and navigation challenges.
 Completed behavior and historical design decisions remain documented in their
 respective sections above.
-
-### Reliable Territory Expansion
-
-The current mapping-efficiency challenge is the transition from finishing one
-territory to unlocking the next. In the latest captured run, Dash visited all
-16 cells of the start territory but unlocked no adjacent territory. It then
-spent the rest of the run approaching and retreating from the four boundaries.
-Physical walls stopped several approaches, but the policy neither committed to
-one possible expansion long enough to prove it nor remembered which attempted
-routes had failed. The final state still treated all four adjacent territories
-as expansion targets.
-
-The next iteration should make territory expansion an explicit, persistent
-process:
-
-1. **Commit to one territory expansion.** After the current territory is
-   explored, choose one adjacent territory as the active expansion target and
-   keep pursuing it until Dash either crosses the shared boundary or determines
-   that no plausible crossing remains. Do not score every heading against
-   whichever adjacent territory happens to align best on that turn.
-2. **Approach a plausible crossing area.** Aim for an open area along the shared
-   boundary rather than the adjacent territory's center. Prefer crossing areas
-   away from known physical walls, and continue refining the approach as new
-   wall observations arrive.
-3. **Learn from physical blockage.** A wall or obstacle encountered during an
-   active expansion should eliminate the attempted crossing area. One blocked
-   point must not reject the whole adjacent territory; mark the territory
-   expansion blocked only after no plausible crossing area remains. Preserve
-   blocked territory expansions across resumed runs so Dash does not repeat
-   exhausted attempts.
-4. **Separate physical blockage from the mental boundary.** Reaching the
-   invisible territory boundary from a fully explored territory should unlock
-   the territory ahead. Hitting a physical wall before reaching that boundary
-   should update the active expansion attempt instead of unlocking or silently
-   returning it to the candidate pool.
-5. **Conclude coverage when expansion is exhausted.** When every unlocked
-   territory is explored and no open territory expansion remains, report
-   coverage complete instead of driving until the time limit. A blocked
-   expansion may be reconsidered later only if new map knowledge reveals a
-   plausible crossing.
-
-At a high level, the resulting flow is:
-
-```text
-explore current territory
-→ get open territory expansions
-→ select and pursue one expansion
-→ cross the mental boundary: unlock and explore the adjacent territory
-→ hit physical blockage: eliminate that crossing area and try another
-→ no plausible crossings remain: add blocked territory expansion
-→ no open expansions remain: conclude coverage
-```
-
-Use simple collection-oriented terminology for the expansion state, such as
-`get_territory_expansions` and `add_blocked_territory_expansion`. A blocked
-territory expansion represents a directed route from one territory to its
-neighbor, not a claim that the neighbor is unreachable from every direction.
 
 ### Local Detour Exploration
 

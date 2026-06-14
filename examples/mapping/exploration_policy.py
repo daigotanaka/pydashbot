@@ -49,6 +49,13 @@ class ExplorationPolicy(ABC):
         """Try to grow the allowed region ahead (never, by default)."""
         return False
 
+    def add_blocked_territory_expansion(self, x, y, heading):
+        """Record a physical stop during expansion (no-op by default)."""
+
+    def is_complete(self):
+        """Whether exploration has exhausted the policy objective."""
+        return False
+
     def report_progress(self):
         """Emit progress after an accepted leg or observation (no-op)."""
 

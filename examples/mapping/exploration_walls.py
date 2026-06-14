@@ -5,6 +5,7 @@ import math
 
 WALL_LINK_MAX_MM = 300
 WALL_SEGMENT_AVOID_MM = 150
+REACHABILITY_WALL_CLEARANCE_MM = 100
 WALL_SEGMENT_SAMPLE_MM = 100
 
 
@@ -35,11 +36,13 @@ def point_segment_distance(point, start, end):
     return math.hypot(point[0] - nearest[0], point[1] - nearest[1])
 
 
-def segment_crosses_wall(start, end, wall_segments):
+def segment_crosses_wall(
+    start, end, wall_segments, clearance_mm=WALL_SEGMENT_AVOID_MM
+):
     for point in (start, end):
         if any(
             point_segment_distance(point, wall_start, wall_end)
-            <= WALL_SEGMENT_AVOID_MM
+            <= clearance_mm
             for wall_start, wall_end in wall_segments
         ):
             return True
@@ -54,7 +57,7 @@ def segment_crosses_wall(start, end, wall_segments):
         )
         if any(
             point_segment_distance(point, wall_start, wall_end)
-            <= WALL_SEGMENT_AVOID_MM
+            <= clearance_mm
             for wall_start, wall_end in wall_segments
         ):
             return True

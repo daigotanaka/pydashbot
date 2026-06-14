@@ -1361,14 +1361,23 @@ class _ExplorationRun:
 
         if left >= PROX_THRESHOLD or right >= PROX_THRESHOLD:
             self.mark_ahead(self.walls, self.known_walls, WALL_OFFSET_MM)
+            self.policy.add_blocked_territory_expansion(
+                self.x, self.y, self.heading
+            )
             return left, right, tilt, 'wall', WALL_SOUNDS, True
         if abs(tilt) > PITCH_TILT_THRESHOLD:
             self.mark_ahead(self.obstacles, self.known_obstacles, OBSTACLE_OFFSET_MM)
+            self.policy.add_blocked_territory_expansion(
+                self.x, self.y, self.heading
+            )
             return left, right, tilt, f'tilt {tilt:+.0f}', TILT_SOUNDS, True
         if abs(traveled) < requested_distance * 0.8:
             if record_early_stop_obstacle:
                 self.mark_ahead(
                     self.obstacles, self.known_obstacles, OBSTACLE_OFFSET_MM
+                )
+                self.policy.add_blocked_territory_expansion(
+                    self.x, self.y, self.heading
                 )
             return left, right, tilt, 'early stop', WALL_SOUNDS, True
         if policy_limit_reached:
@@ -1460,6 +1469,9 @@ class _ExplorationRun:
 
     def explore_until(self, end_time):
         while time.time() < end_time and not self.quality['tracking_lost']:
+            if self.policy.is_complete():
+                print('\n  [coverage complete] no open territory expansion remains')
+                break
             remaining = end_time - time.time()
             desired_distance = forward_distance_for_remaining(remaining)
             requested_distance = self.policy.forward_distance(
@@ -1500,7 +1512,10 @@ class _ExplorationRun:
                 )
             self.report_leg(remaining, traveled, left, right, tilt)
 
-            if time.time() < end_time:
+            if (
+                time.time() < end_time
+                and (back_away or not self.policy.is_complete())
+            ):
                 self.redirect(reason, sounds, back_away, left, right)
 
     def result(self):

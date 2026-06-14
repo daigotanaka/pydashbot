@@ -5,6 +5,7 @@ import math
 try:
     from examples.mapping.exploration_policy import ExplorationPolicy
     from examples.mapping.exploration_walls import (
+        REACHABILITY_WALL_CLEARANCE_MM,
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
         segment_crosses_wall,
@@ -12,6 +13,7 @@ try:
 except ModuleNotFoundError:
     from exploration_policy import ExplorationPolicy
     from exploration_walls import (
+        REACHABILITY_WALL_CLEARANCE_MM,
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
         segment_crosses_wall,
@@ -126,7 +128,11 @@ def territory_resolution(
                 neighbor in all_cells
                 and neighbor not in blocked
                 and neighbor not in reachable
-                and not segment_crosses_wall(*connection, wall_segments)
+                and not segment_crosses_wall(
+                    *connection,
+                    wall_segments,
+                    clearance_mm=REACHABILITY_WALL_CLEARANCE_MM,
+                )
             ):
                 reachable.add(neighbor)
                 pending.append(neighbor)

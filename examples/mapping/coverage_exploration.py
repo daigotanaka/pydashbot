@@ -77,6 +77,10 @@ COVERAGE_CELL_WEIGHT = 20000
 # Legs aimed at the focus without gaining a cell before it is abandoned.
 STALL_LEGS = 3
 
+# A shared territory boundary is tested at the center of each reachability cell.
+# One physical stop eliminates one crossing area, not the whole expansion.
+EXPANSION_CROSSINGS = 4
+
 
 class CoverageExploration(ConservativeExploration):
     """Conservative exploration that maximizes newly-visited cells per leg."""
@@ -95,10 +99,33 @@ class CoverageExploration(ConservativeExploration):
         )
         # Territories given up as unreachable-in-practice (carried across runs).
         self.abandoned = set()
+        self.blocked_territory_expansions = set()
+        self.active_territory_expansion = None
         for run in runs:
             state = run.get(self.metadata_key, {})
             for cell in state.get('abandoned', []):
                 self.abandoned.add(tuple(int(value) for value in cell))
+            for expansion in state.get('blocked_territory_expansions', []):
+                source, target = expansion
+                self.blocked_territory_expansions.add(
+                    (
+                        tuple(int(value) for value in source),
+                        tuple(int(value) for value in target),
+                    )
+                )
+            if state.get('active_territory_expansion') is not None:
+                self.active_territory_expansion = tuple(
+                    tuple(int(value) for value in cell)
+                    for cell in state['active_territory_expansion']
+                )
+        # Abandonment exists only for a territory the robot cannot physically
+        # enter. Once any cell was visited, normal reachability owns its state.
+        self.abandoned = {
+            cell
+            for cell in self.abandoned
+            if not territory_coverage(cell, self.path_points, self.territory_mm)
+        }
+        self.active_expansion_crossing = None
         self._tracked_focus = self.focus
         self._focus_visited = self._focus_coverage()
         self._stall_legs = 0
@@ -144,6 +171,7 @@ class CoverageExploration(ConservativeExploration):
         # robot cannot enter is abandoned, then let the parent reselect focus.
         self._note_progress()
         super().unlock_if_complete()
+        self._select_territory_expansion()
 
     def _unlock_new_territory(self):
         # Coverage creates territories only where the robot physically reaches a
@@ -154,47 +182,146 @@ class CoverageExploration(ConservativeExploration):
         # nearest expandable frontier instead.
         return
 
-    def _expansion_targets(self):
-        """Un-unlocked territories adjacent to the explored region.
+    def _territory_expansion_crossings(self, source, target):
+        """Return plausible crossing points along the shared territory boundary."""
+        dx, dy = target[0] - source[0], target[1] - source[1]
+        if abs(dx) + abs(dy) != 1:
+            return []
+        step = self.territory_mm / EXPANSION_CROSSINGS
+        offsets = [(index + 0.5) * step for index in range(EXPANSION_CROSSINGS)]
+        if dx:
+            x = (source[0] + (1 if dx > 0 else 0)) * self.territory_mm
+            points = [(x, source[1] * self.territory_mm + offset) for offset in offsets]
+        else:
+            y = (source[1] + (1 if dy > 0 else 0)) * self.territory_mm
+            points = [(source[0] * self.territory_mm + offset, y) for offset in offsets]
+        return [
+            point
+            for point in points
+            if not any(
+                math.hypot(point[0] - bx, point[1] - by) <= WALL_SEGMENT_AVOID_MM
+                for bx, by in self.blockers
+            )
+            and not any(
+                point_segment_distance(point, wall_start, wall_end)
+                <= WALL_SEGMENT_AVOID_MM
+                for wall_start, wall_end in self.wall_segments
+            )
+        ]
 
-        These are where ``expand_past_boundary`` can open the next territory, so
-        when the focus has nothing left the robot should head toward the nearest
-        one. Abandoned territories and their re-entry are excluded.
-        """
+    def get_territory_expansions(self):
+        """Return open directed expansions from explored unlocked territories."""
         allowed = set(self.territories)
-        targets = set()
-        for cell in self.territories:
-            if cell in self.abandoned:
+        expansions = set()
+        for source in self.territories:
+            if source in self.abandoned or not self.territory_explored(source):
                 continue
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                neighbor = (cell[0] + dx, cell[1] + dy)
-                if neighbor not in allowed and neighbor not in self.abandoned:
-                    targets.add(neighbor)
-        return targets
+                target = (source[0] + dx, source[1] + dy)
+                expansion = (source, target)
+                if (
+                    target not in allowed
+                    and target not in self.abandoned
+                    and expansion not in self.blocked_territory_expansions
+                    and self._territory_expansion_crossings(source, target)
+                ):
+                    expansions.add(expansion)
+        return expansions
+
+    def _select_territory_expansion(self):
+        """Keep the active expansion stable, or select the nearest open crossing."""
+        expansions = self.get_territory_expansions()
+        x, y = self.path_points[-1] if self.path_points else (0.0, 0.0)
+        if self.active_territory_expansion in expansions:
+            crossings = self._territory_expansion_crossings(
+                *self.active_territory_expansion
+            )
+            if self.active_expansion_crossing in crossings:
+                return
+            self.active_expansion_crossing = min(
+                crossings,
+                key=lambda crossing: math.hypot(
+                    crossing[0] - x, crossing[1] - y
+                ),
+            )
+            return
+        self.active_territory_expansion = None
+        self.active_expansion_crossing = None
+        if not expansions:
+            return
+        _, source, target, crossing = min(
+            (
+                math.hypot(crossing[0] - x, crossing[1] - y),
+                source,
+                target,
+                crossing,
+            )
+            for source, target in expansions
+            for crossing in self._territory_expansion_crossings(source, target)
+        )
+        self.active_territory_expansion = (source, target)
+        self.active_expansion_crossing = crossing
+        print(
+            f'\n  [territory expansion selected] {source} -> {target} '
+            f'via ({crossing[0]:.0f}, {crossing[1]:.0f})'
+        )
 
     def _aim_toward_expansion(self, x, y, heading, clearance):
-        """Score a heading by how well it points at the nearest expandable frontier.
+        """Score a heading by how well it points at the active boundary crossing.
 
-        Used when the focus territory has nothing left to gain: steer the robot
-        toward un-unlocked space so it reaches a boundary and the next territory
-        is opened there, rather than drifting on bare clearance back through
-        finished territory.
+        Keeping one target stable prevents every heading from receiving a strong
+        score merely because there is some unopened territory in that direction.
         """
-        targets = self._expansion_targets()
-        if not targets:
+        self._select_territory_expansion()
+        if self.active_expansion_crossing is None:
             return clearance
         hr = math.radians(heading)
         ux, uy = math.cos(hr), math.sin(hr)
-        centers = [
-            ((c[0] + 0.5) * self.territory_mm, (c[1] + 0.5) * self.territory_mm)
-            for c in targets
-        ]
-        best_alignment = max(
-            ((tx - x) * ux + (ty - y) * uy) / math.hypot(tx - x, ty - y)
-            for tx, ty in centers
-            if math.hypot(tx - x, ty - y) > 0
+        tx, ty = self.active_expansion_crossing
+        distance = math.hypot(tx - x, ty - y)
+        if not distance:
+            return FRONTIER_HEADING_WEIGHT + min(clearance, self.grid_mm)
+        alignment = ((tx - x) * ux + (ty - y) * uy) / distance
+        return alignment * FRONTIER_HEADING_WEIGHT + min(clearance, self.grid_mm)
+
+    def add_blocked_territory_expansion(self, x, y, heading):
+        """Close an expansion only after physical evidence blocks every crossing."""
+        expansion = self.active_territory_expansion
+        if expansion is None:
+            return
+        source, target = expansion
+        if territory_cell(x, y, self.territory_mm) != source:
+            return
+        if self.territory_ahead(x, y, heading) != target:
+            return
+        if self._territory_expansion_crossings(source, target):
+            self.active_expansion_crossing = None
+            self._select_territory_expansion()
+            return
+        self.blocked_territory_expansions.add(expansion)
+        self.active_territory_expansion = None
+        self.active_expansion_crossing = None
+        print(f'\n  [territory expansion blocked] {source} -> {target}')
+        self._select_territory_expansion()
+
+    def expand_past_boundary(self, x, y, heading):
+        self._select_territory_expansion()
+        current = territory_cell(x, y, self.territory_mm)
+        ahead = self.territory_ahead(x, y, heading)
+        if self.active_territory_expansion != (current, ahead):
+            return False
+        expanded = super().expand_past_boundary(x, y, heading)
+        if expanded:
+            self.active_territory_expansion = None
+            self.active_expansion_crossing = None
+        return expanded
+
+    def is_complete(self):
+        return (
+            bool(self.territories)
+            and all(self.territory_explored(cell) for cell in self.territories)
+            and not self.get_territory_expansions()
         )
-        return best_alignment * FRONTIER_HEADING_WEIGHT + min(clearance, self.grid_mm)
 
     def _note_progress(self):
         if self.focus != self._tracked_focus:
@@ -212,9 +339,10 @@ class CoverageExploration(ConservativeExploration):
         if (
             self._stall_legs >= STALL_LEGS
             and self.focus not in self.abandoned
+            and coverage == 0
             and not super().territory_explored(self.focus)
         ):
-            # Has a frontier on paper but we keep gaining nothing: give it up.
+            # Has a frontier on paper but was never entered: give it up.
             self.abandoned.add(self.focus)
             print(
                 f"\n  [focus abandoned] {self.focus}: no new cells in "
@@ -289,4 +417,12 @@ class CoverageExploration(ConservativeExploration):
         data = super().metadata()
         data['objective'] = 'coverage'
         data['abandoned'] = sorted(self.abandoned)
+        data['blocked_territory_expansions'] = sorted(
+            (list(source), list(target))
+            for source, target in self.blocked_territory_expansions
+        )
+        if self.active_territory_expansion is not None:
+            data['active_territory_expansion'] = [
+                list(cell) for cell in self.active_territory_expansion
+            ]
         return data
