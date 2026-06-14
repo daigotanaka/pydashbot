@@ -323,14 +323,6 @@ class MappingStrategyTests(unittest.TestCase):
             [(1000.0, 1000.0), (1000.0, 0.0), (0.0, 0.0)],
         )
 
-    def test_home_route_removes_wall_contact_backtracking_spike(self):
-        self.assertEqual(
-            map_room.simplify_home_route(
-                [(800, 0), (1000, 0), (0, 0)]
-            ),
-            [(800.0, 0.0), (0.0, 0.0)],
-        )
-
     def test_home_route_rejects_untrustworthy_final_pose(self):
         data = {
             "runs": [
@@ -366,18 +358,6 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(
             map_room.plan_home_route(data),
             [(1000.0, 0.0), (0.0, 0.0)],
-        )
-
-    def test_collect_blocked_edges_reads_recorded_segments(self):
-        data = {
-            "runs": [
-                {"path": [[0, 0, 0]]},
-                {"blocked_edges": [{"from": [1, 2], "to": [3, 4], "stop": [2, 3]}]},
-            ]
-        }
-        self.assertEqual(
-            map_room.collect_blocked_edges(data),
-            [((1.0, 2.0), (3.0, 4.0))],
         )
 
     def test_edge_is_blocked_excludes_only_collinear_overlap(self):
@@ -607,13 +587,6 @@ class MappingStrategyTests(unittest.TestCase):
             runs = map_room.go_home_with_retries({"runs": []}, 1.0, 1.0, max_retries=3)
         self.assertEqual(go_home.call_count, 1)
         self.assertEqual(runs, [])
-
-    def test_latest_map_file_includes_legacy_map(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            legacy = root / "room_map.json"
-            legacy.write_text("{}")
-            self.assertEqual(map_room.latest_map_file(root), legacy)
 
     def test_forward_distance_is_integer_and_fits_remaining_time(self):
         self.assertEqual(map_room.forward_distance_for_remaining(60), 3000)

@@ -59,8 +59,6 @@ except ModuleNotFoundError:
     )
 
 CAL_FILE_PATTERN = 'calibration_????????-??-??-??.json'
-MAP_FILE_PATTERN = 'room_map_????????-??-??-??.json'
-LEGACY_MAP_FILE = Path('room_map.json')
 
 # --- Tunable parameters ---
 PROX_THRESHOLD    = 15
@@ -545,19 +543,6 @@ def latest_calibration_file(directory=Path('.')):
     return files[-1]
 
 
-def latest_map_file(directory=Path('.')):
-    """Return the newest timestamped map, falling back to the legacy filename."""
-    files = list(directory.glob(MAP_FILE_PATTERN))
-    legacy = directory / LEGACY_MAP_FILE
-    if legacy.exists():
-        files.append(legacy)
-    if not files:
-        raise FileNotFoundError(
-            "No room_map_YYYYMMDD-HH-MM-SS.json or room_map.json file found."
-        )
-    return max(files, key=lambda path: path.stat().st_mtime)
-
-
 def load_map_data(map_file):
     """Load a map and validate the calibration needed to extend it."""
     data = json.loads(map_file.read_text())
@@ -597,51 +582,6 @@ def map_start_pose(data):
         raise ValueError("map does not contain a starting robot pose")
     x, y, heading = runs[0]['path'][0]
     return float(x), float(y), float(heading)
-
-
-def simplify_home_route(route):
-    """Remove duplicate and nearly straight waypoints without creating shortcuts."""
-    deduped = []
-    for point in route:
-        point = (float(point[0]), float(point[1]))
-        if not deduped or math.dist(point, deduped[-1]) > 1:
-            deduped.append(point)
-
-    simplified = []
-    for point in deduped:
-        simplified.append(point)
-        while len(simplified) >= 3:
-            a, b, c = simplified[-3:]
-            ab = math.atan2(b[1] - a[1], b[0] - a[0])
-            bc = math.atan2(c[1] - b[1], c[0] - b[0])
-            turn = (bc - ab + math.pi) % (2 * math.pi) - math.pi
-            turn_degrees = abs(math.degrees(turn))
-            if (
-                turn_degrees > HOME_ROUTE_COLLINEAR_DEG
-                and turn_degrees < 180 - HOME_ROUTE_COLLINEAR_DEG
-            ):
-                break
-            simplified.pop(-2)
-    return simplified
-
-
-def collect_blocked_edges(data):
-    """Return blocked-route segments recorded by prior aborted go-home runs.
-
-    Each segment is ((from_x, from_y), (to_x, to_y)) for a proven path leg that
-    a go-home attempt found physically obstructed.
-    """
-    edges = []
-    for run in data.get('runs', []):
-        for edge in run.get('blocked_edges', []):
-            if 'from' in edge and 'to' in edge:
-                edges.append(
-                    (
-                        (float(edge['from'][0]), float(edge['from'][1])),
-                        (float(edge['to'][0]), float(edge['to'][1])),
-                    )
-                )
-    return edges
 
 
 def plan_home_route(data, strategy=ACTIVE_GO_HOME_STRATEGY):
@@ -1156,6 +1096,440 @@ def go_home_with_retries(
 # ---------------------------------------------------------------------------
 # Exploration
 # ---------------------------------------------------------------------------
+class _ExplorationRun:
+    """Mutable state and behaviour for a single exploration run.
+
+    ``explore`` below is the high-level driver; everything that mutates the
+    live pose, the accumulated map, or the run quality lives here as methods,
+    so the driver stays short and the flow is easy to read.
+    """
+
+    def __init__(
+        self,
+        deg_per_yaw,
+        mm_per_wd,
+        x0,
+        y0,
+        heading0=0.0,
+        strategy_map=None,
+        duration=DURATION,
+        conservative_exploration=True,
+        territory_mm=TERRITORY_MM,
+        command_policy=None,
+    ):
+        self.deg_per_yaw = deg_per_yaw
+        self.mm_per_wd = mm_per_wd
+        self.duration = duration
+        self.command_policy = command_policy
+
+        self.yaw_prev = send_command('get_yaw')['result']
+        self.left_prev = send_command('get_left_wheel')['result']
+        self.right_prev = send_command('get_right_wheel')['result']
+        pitch_samples = [send_command('get_pitch')['result'] for _ in range(5)]
+        self.baseline_pitch = sum(pitch_samples) / len(pitch_samples)
+
+        self.heading = normalize_heading(heading0)
+        self.x, self.y = x0, y0
+
+        self.path = [(self.x, self.y, self.heading)]
+        self.walls = []
+        self.obstacles = []
+        self.events = []
+        self.quality = {
+            'accepted_updates': 0,
+            'rejected_updates': 0,
+            'loop_closures': 0,
+            'loop_closure_correction_mm': 0.0,
+            'tracking_lost': False,
+            'issues': [],
+        }
+        self.policy_commands_completed = 0
+        self.cell_mm = territory_mm / GRID_CELLS
+        self.path_sample_mm = self.cell_mm / 2
+        self.known_path, self.known_blockers = map_knowledge(
+            strategy_map or {}, path_sample_mm=self.path_sample_mm
+        )
+        self.known_walls = [
+            (float(point[0]), float(point[1]))
+            for run in accepted_runs(strategy_map or {})
+            for point in run.get('walls', [])
+        ]
+        self.known_obstacles = [
+            (float(point[0]), float(point[1]))
+            for run in accepted_runs(strategy_map or {})
+            for point in run.get('obstacles', [])
+        ]
+        # Link wall observations within one reachability cell, so a smaller
+        # territory infers continuous walls at a proportionally finer scale
+        # (cell = territory / grid). Replaces the former fixed 300 mm threshold.
+        self.known_wall_segments = inferred_wall_segments(
+            self.known_walls, max_distance=self.cell_mm
+        )
+        self.policy = (
+            ConservativeExploration(
+                accepted_runs(strategy_map or {}),
+                (self.x, self.y),
+                self.known_path,
+                self.known_blockers,
+                self.known_wall_segments,
+                territory_mm,
+            )
+            if conservative_exploration
+            else None
+        )
+        self.known_path.append((self.x, self.y))
+
+    # -- pose tracking -----------------------------------------------------
+    def update_pose(self, action, requested):
+        yaw_now = read_settled('get_yaw')
+        left_now = read_settled('get_left_wheel')
+        right_now = read_settled('get_right_wheel')
+        d_yaw = wrap_delta(self.yaw_prev, yaw_now, 12)
+        left_delta = wrap_delta(self.left_prev, left_now, 16)
+        right_delta = wrap_delta(self.right_prev, right_now, 16)
+        d_dist = (left_delta + right_delta) / 2
+        heading_delta = d_yaw * self.deg_per_yaw
+        d_mm = d_dist * self.mm_per_wd
+        self.yaw_prev = yaw_now
+        self.left_prev = left_now
+        self.right_prev = right_now
+        issues = validate_odometry(
+            action,
+            requested,
+            d_mm,
+            heading_delta,
+            left_delta,
+            right_delta,
+            self.mm_per_wd,
+        )
+        event = {
+            'action': action,
+            'requested': requested,
+            'raw_yaw_delta': d_yaw,
+            'raw_left_wheel_delta': left_delta,
+            'raw_right_wheel_delta': right_delta,
+            'translation_wheel_delta': d_dist,
+            'heading_delta': heading_delta,
+            'distance_mm': d_mm,
+            'accepted': not issues and not self.quality['tracking_lost'],
+        }
+        if issues:
+            event['issues'] = issues
+            self.quality['rejected_updates'] += 1
+            self.quality['tracking_lost'] = True
+            self.quality['issues'].extend(issues)
+            print(f"\n  [odometry rejected] {'; '.join(issues)}")
+        elif self.quality['tracking_lost']:
+            event['issues'] = ['pose tracking was already lost']
+        else:
+            previous_position = (self.x, self.y)
+            self.heading = normalize_heading(self.heading + heading_delta)
+            hr = math.radians(self.heading)
+            self.x += d_mm * math.cos(hr)
+            self.y += d_mm * math.sin(hr)
+            self.path.append((self.x, self.y, self.heading))
+            self.known_path.extend(
+                densify_path(
+                    [previous_position, (self.x, self.y)], self.path_sample_mm
+                )[1:]
+            )
+            self.quality['accepted_updates'] += 1
+            if self.policy:
+                self.policy.report_progress()
+        self.events.append(event)
+        if not event['accepted']:
+            return None
+        return d_mm
+
+    # -- steering ----------------------------------------------------------
+    def turn_toward_knowledge(self, reason, left=0, right=0, require_turn=False):
+        if self.policy:
+            self.policy.unlock_if_complete()
+        turn_angle = choose_exploration_angle(
+            self.x,
+            self.y,
+            self.heading,
+            self.known_path,
+            self.known_blockers,
+            blocked_left=left,
+            blocked_right=right,
+            require_turn=require_turn,
+            point_allowed=self.policy.allows_point if self.policy else None,
+            heading_preference=(
+                self.policy.heading_preference if self.policy else None
+            ),
+            wall_segments=self.known_wall_segments,
+        )
+        print(f'\n  [{reason}] map-guided turn {turn_angle:+.0f}°')
+        for step in tracked_turn_steps(turn_angle):
+            if not step:
+                continue
+            send_command('turn', step)
+            if self.update_pose('turn', step) is None:
+                break
+
+    def redirect(self, reason, sounds=None, back_away=False, left=0, right=0):
+        print(f'\n  [{reason}] changing direction')
+        send_command('stop')
+        send_command('neck_color', '#ff0000')
+        if sounds:
+            send_command('say', random.choice(sounds))
+        if back_away:
+            send_command('move', -BACK_AWAY_MM, BACK_AWAY_SPEED_MMPS)
+            self.update_pose('reverse', BACK_AWAY_MM)
+        self.turn_toward_knowledge(reason, left, right, require_turn=True)
+        send_command('say', random.choice(RESUME_SOUNDS))
+        send_command('neck_color', '#00ff00')
+
+    # -- observations ------------------------------------------------------
+    def mark_ahead(self, points, landmarks, offset):
+        if self.quality['tracking_lost']:
+            return
+        hr = math.radians(self.heading)
+        point = (self.x + offset * math.cos(hr), self.y + offset * math.sin(hr))
+        correction = revisit_pose_correction(
+            self.x,
+            self.y,
+            point,
+            self.known_path[:-1],
+            landmarks,
+        )
+        if correction:
+            dx, dy, target, mismatch = correction
+            self.x += dx
+            self.y += dy
+            self.path[-1] = (self.x, self.y, self.heading)
+            self.known_path[-1] = (self.x, self.y)
+            point = (
+                self.x + offset * math.cos(hr),
+                self.y + offset * math.sin(hr),
+            )
+            correction_mm = math.hypot(dx, dy)
+            self.quality['loop_closures'] += 1
+            self.quality['loop_closure_correction_mm'] += correction_mm
+            self.events[-1]['loop_closure'] = {
+                'matched_landmark': target,
+                'observation_mismatch_mm': mismatch,
+                'pose_correction': (dx, dy),
+            }
+            print(
+                f'\n  [revisit] corrected pose by {correction_mm:.0f}mm '
+                f'toward known landmark'
+            )
+        points.append(point)
+        landmarks.append(point)
+        self.known_blockers.append(point)
+        if points is self.walls:
+            self.known_wall_segments[:] = inferred_wall_segments(
+                self.known_walls, max_distance=self.cell_mm
+            )
+        if self.policy:
+            self.policy.report_progress()
+
+    def report_leg(self, remaining, traveled, left, right, tilt):
+        print(
+            f'  [{remaining:4.1f}s] ({self.x:6.0f},{self.y:6.0f})mm  '
+            f'hdg={self.heading:6.1f}°  leg={traveled:5.0f}mm  '
+            f'prox L={left:2d} R={right:2d}  tilt={tilt:+.0f}',
+            end='\r',
+        )
+
+    def handle_leg_end(
+        self,
+        traveled,
+        requested_distance,
+        policy_limit_reached=False,
+        record_early_stop_obstacle=True,
+    ):
+        left = send_command('get_prox_left')['result']
+        right = send_command('get_prox_right')['result']
+        pitch = send_command('get_pitch')['result']
+        tilt = pitch - self.baseline_pitch
+
+        if left >= PROX_THRESHOLD or right >= PROX_THRESHOLD:
+            self.mark_ahead(self.walls, self.known_walls, WALL_OFFSET_MM)
+            return left, right, tilt, 'wall', WALL_SOUNDS, True
+        if abs(tilt) > PITCH_TILT_THRESHOLD:
+            self.mark_ahead(self.obstacles, self.known_obstacles, OBSTACLE_OFFSET_MM)
+            return left, right, tilt, f'tilt {tilt:+.0f}', TILT_SOUNDS, True
+        if abs(traveled) < requested_distance * 0.8:
+            if record_early_stop_obstacle:
+                self.mark_ahead(
+                    self.obstacles, self.known_obstacles, OBSTACLE_OFFSET_MM
+                )
+            return left, right, tilt, 'early stop', WALL_SOUNDS, True
+        if policy_limit_reached:
+            return left, right, tilt, 'exploration boundary', None, False
+        return left, right, tilt, 'forward leg complete', None, False
+
+    def stop_safely(self):
+        send_command('stop')
+        send_command('say', 'bye')
+        send_command('neck_color', '#ffffff')
+
+    # -- run phases --------------------------------------------------------
+    def announce(self):
+        if self.command_policy:
+            print(f"\n=== Exploring preset course ===")
+        else:
+            print(f"\n=== Exploring for {self.duration:g}s ===")
+            print(
+                f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
+                "walls and tilt stop each leg early."
+            )
+        if self.policy:
+            print(self.policy.describe())
+        else:
+            print("  Experimental conservative exploration disabled.")
+        send_command('say', 'hi')
+        send_command('neck_color', '#00ff00')
+        if self.policy:
+            self.policy.report_progress()
+        if self.command_policy:
+            print(
+                f"  Command policy: {self.command_policy.name} "
+                f"({len(self.command_policy.commands)} commands)"
+            )
+
+    def drive_preset_course(self):
+        command_policy = self.command_policy
+        for index, command in enumerate(command_policy.commands, start=1):
+            if self.quality['tracking_lost']:
+                break
+            name, value = command['command'], command['value']
+            print(
+                f"\n  [preset {index}/{len(command_policy.commands)}] "
+                f"{name} {value:g}"
+            )
+            if name == 'turn':
+                for step in tracked_turn_steps(value):
+                    send_command('turn', step)
+                    if self.update_pose('turn', step) is None:
+                        break
+                if self.quality['tracking_lost']:
+                    break
+                self.policy_commands_completed = index
+                continue
+            response = send_command(
+                'move',
+                value,
+                SENSOR_SAFE_SPEED_MMPS,
+                wall_stop_sound=None,
+                stop_at_obstacle=command['stop_at_obstacle'],
+            )
+            if not response.get('ok', False):
+                self.quality['tracking_lost'] = True
+                issue = f"preset move command failed: {response.get('error', 'unknown error')}"
+                self.quality['issues'].append(issue)
+                self.events.append(
+                    {
+                        'action': 'forward',
+                        'requested': value,
+                        'accepted': False,
+                        'issues': [issue],
+                        'motion_response': response,
+                    }
+                )
+                print(f"\n  [preset halted] {issue}")
+                break
+            traveled = self.update_pose('forward', value)
+            self.events[-1]['motion_outcome'] = response['result']
+            if traveled is None:
+                break
+            left, right, tilt, reason, _, back_away = self.handle_leg_end(
+                traveled,
+                value,
+                record_early_stop_obstacle=command['stop_at_obstacle'],
+            )
+            self.report_leg(0.0, traveled, left, right, tilt)
+            if back_away:
+                print(f"\n  [preset halted] {reason}")
+                break
+            self.policy_commands_completed = index
+        if self.policy_commands_completed == len(command_policy.commands):
+            print("\n  [preset complete] final action finished")
+
+    def explore_until(self, end_time):
+        while time.time() < end_time and not self.quality['tracking_lost']:
+            remaining = end_time - time.time()
+            desired_distance = forward_distance_for_remaining(remaining)
+            requested_distance = (
+                self.policy.forward_distance(
+                    self.x, self.y, self.heading, desired_distance
+                )
+                if self.policy
+                else desired_distance
+            )
+            policy_limit_reached = requested_distance < desired_distance
+            if requested_distance < MIN_FORWARD_DISTANCE_MM:
+                # Pinned against the invisible territory wall. If the territory
+                # the robot is in is fully mapped, unlock the one ahead and
+                # re-evaluate instead of turning back.
+                if self.policy and self.policy.expand_past_boundary(
+                    self.x, self.y, self.heading
+                ):
+                    continue
+                self.redirect('exploration boundary')
+                continue
+            send_command(
+                'move',
+                requested_distance,
+                FORWARD_SPEED_MMPS,
+                wall_stop_sound=None,
+            )
+            traveled = self.update_pose('forward', requested_distance)
+            remaining = max(0.0, end_time - time.time())
+            if traveled is None:
+                left = send_command('get_prox_left')['result']
+                right = send_command('get_prox_right')['result']
+                tilt = send_command('get_pitch')['result'] - self.baseline_pitch
+                reason, sounds, back_away = 'odometry rejected', None, False
+                traveled = 0.0
+                self.report_leg(remaining, traveled, left, right, tilt)
+                break
+            else:
+                left, right, tilt, reason, sounds, back_away = self.handle_leg_end(
+                    traveled,
+                    requested_distance,
+                    policy_limit_reached,
+                )
+            self.report_leg(remaining, traveled, left, right, tilt)
+
+            if time.time() < end_time:
+                self.redirect(reason, sounds, back_away, left, right)
+
+    def result(self):
+        return {
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+            'duration_seconds': self.duration,
+            'status': 'partial' if self.quality['tracking_lost'] else 'accepted',
+            'quality': self.quality,
+            'path': self.path,
+            'walls': self.walls,
+            'obstacles': self.obstacles,
+            **(
+                {self.policy.metadata_key: self.policy.metadata()}
+                if self.policy
+                else {}
+            ),
+            **(
+                {
+                    'exploration_policy': {
+                        **self.command_policy.metadata(),
+                        'commands_completed': self.policy_commands_completed,
+                        'completed': (
+                            self.policy_commands_completed
+                            == len(self.command_policy.commands)
+                        ),
+                    }
+                }
+                if self.command_policy
+                else {}
+            ),
+            'events': self.events,
+        }
+
+
 def explore(
     deg_per_yaw,
     mm_per_wd,
@@ -1168,395 +1542,43 @@ def explore(
     territory_mm=TERRITORY_MM,
     command_policy=None,
 ):
-    yaw_prev = send_command('get_yaw')['result']
-    left_prev = send_command('get_left_wheel')['result']
-    right_prev = send_command('get_right_wheel')['result']
-    pitch_samples = [send_command('get_pitch')['result'] for _ in range(5)]
-    baseline_pitch = sum(pitch_samples) / len(pitch_samples)
+    """Drive one exploration run and return its recorded map contribution.
 
-    heading = normalize_heading(heading0)
-    x, y = x0, y0
-
-    path      = [(x, y, heading)]
-    walls     = []
-    obstacles = []
-    events = []
-    quality = {
-        'accepted_updates': 0,
-        'rejected_updates': 0,
-        'loop_closures': 0,
-        'loop_closure_correction_mm': 0.0,
-        'tracking_lost': False,
-        'issues': [],
-    }
-    policy_commands_completed = 0
-    cell_mm = territory_mm / GRID_CELLS
-    path_sample_mm = cell_mm / 2
-    known_path, known_blockers = map_knowledge(
-        strategy_map or {}, path_sample_mm=path_sample_mm
+    High-level flow: set up the run, announce it, then either replay a preset
+    course or explore on a time budget, and always stop the robot safely.
+    """
+    run = _ExplorationRun(
+        deg_per_yaw,
+        mm_per_wd,
+        x0,
+        y0,
+        heading0,
+        strategy_map,
+        duration,
+        conservative_exploration,
+        territory_mm,
+        command_policy,
     )
-    known_walls = [
-        (float(point[0]), float(point[1]))
-        for run in accepted_runs(strategy_map or {})
-        for point in run.get('walls', [])
-    ]
-    known_obstacles = [
-        (float(point[0]), float(point[1]))
-        for run in accepted_runs(strategy_map or {})
-        for point in run.get('obstacles', [])
-    ]
-    # Link wall observations within one reachability cell, so a smaller
-    # territory infers continuous walls at a proportionally finer scale
-    # (cell = territory / grid). Replaces the former fixed 300 mm threshold.
-    known_wall_segments = inferred_wall_segments(known_walls, max_distance=cell_mm)
-    policy = (
-        ConservativeExploration(
-            accepted_runs(strategy_map or {}),
-            (x, y),
-            known_path,
-            known_blockers,
-            known_wall_segments,
-            territory_mm,
-        )
-        if conservative_exploration
-        else None
-    )
-    known_path.append((x, y))
-
-    def update_pose(action, requested):
-        nonlocal heading, x, y, yaw_prev, left_prev, right_prev
-        yaw_now = read_settled('get_yaw')
-        left_now = read_settled('get_left_wheel')
-        right_now = read_settled('get_right_wheel')
-        d_yaw = wrap_delta(yaw_prev, yaw_now, 12)
-        left_delta = wrap_delta(left_prev, left_now, 16)
-        right_delta = wrap_delta(right_prev, right_now, 16)
-        d_dist = (left_delta + right_delta) / 2
-        heading_delta = d_yaw * deg_per_yaw
-        d_mm = d_dist * mm_per_wd
-        yaw_prev = yaw_now
-        left_prev = left_now
-        right_prev = right_now
-        issues = validate_odometry(
-            action,
-            requested,
-            d_mm,
-            heading_delta,
-            left_delta,
-            right_delta,
-            mm_per_wd,
-        )
-        event = {
-            'action': action,
-            'requested': requested,
-            'raw_yaw_delta': d_yaw,
-            'raw_left_wheel_delta': left_delta,
-            'raw_right_wheel_delta': right_delta,
-            'translation_wheel_delta': d_dist,
-            'heading_delta': heading_delta,
-            'distance_mm': d_mm,
-            'accepted': not issues and not quality['tracking_lost'],
-        }
-        if issues:
-            event['issues'] = issues
-            quality['rejected_updates'] += 1
-            quality['tracking_lost'] = True
-            quality['issues'].extend(issues)
-            print(f"\n  [odometry rejected] {'; '.join(issues)}")
-        elif quality['tracking_lost']:
-            event['issues'] = ['pose tracking was already lost']
-        else:
-            previous_position = (x, y)
-            heading = normalize_heading(heading + heading_delta)
-            hr = math.radians(heading)
-            x += d_mm * math.cos(hr)
-            y += d_mm * math.sin(hr)
-            path.append((x, y, heading))
-            known_path.extend(
-                densify_path([previous_position, (x, y)], path_sample_mm)[1:]
-            )
-            quality['accepted_updates'] += 1
-            if policy:
-                policy.report_progress()
-        events.append(event)
-        if not event['accepted']:
-            return None
-        return d_mm
-
-    def turn_toward_knowledge(reason, left=0, right=0, require_turn=False):
-        if policy:
-            policy.unlock_if_complete()
-        turn_angle = choose_exploration_angle(
-            x,
-            y,
-            heading,
-            known_path,
-            known_blockers,
-            blocked_left=left,
-            blocked_right=right,
-            require_turn=require_turn,
-            point_allowed=policy.allows_point if policy else None,
-            heading_preference=policy.heading_preference if policy else None,
-            wall_segments=known_wall_segments,
-        )
-        print(f'\n  [{reason}] map-guided turn {turn_angle:+.0f}°')
-        for step in tracked_turn_steps(turn_angle):
-            if not step:
-                continue
-            send_command('turn', step)
-            if update_pose('turn', step) is None:
-                break
-
-    def redirect(reason, sounds=None, back_away=False, left=0, right=0):
-        print(f'\n  [{reason}] changing direction')
-        send_command('stop')
-        send_command('neck_color', '#ff0000')
-        if sounds:
-            send_command('say', random.choice(sounds))
-        if back_away:
-            send_command('move', -BACK_AWAY_MM, BACK_AWAY_SPEED_MMPS)
-            update_pose('reverse', BACK_AWAY_MM)
-        turn_toward_knowledge(reason, left, right, require_turn=True)
-        send_command('say', random.choice(RESUME_SOUNDS))
-        send_command('neck_color', '#00ff00')
-
-    def mark_ahead(points, landmarks, offset):
-        nonlocal x, y
-        if quality['tracking_lost']:
-            return
-        hr = math.radians(heading)
-        point = (x + offset * math.cos(hr), y + offset * math.sin(hr))
-        correction = revisit_pose_correction(
-            x,
-            y,
-            point,
-            known_path[:-1],
-            landmarks,
-        )
-        if correction:
-            dx, dy, target, mismatch = correction
-            x += dx
-            y += dy
-            path[-1] = (x, y, heading)
-            known_path[-1] = (x, y)
-            point = (x + offset * math.cos(hr), y + offset * math.sin(hr))
-            correction_mm = math.hypot(dx, dy)
-            quality['loop_closures'] += 1
-            quality['loop_closure_correction_mm'] += correction_mm
-            events[-1]['loop_closure'] = {
-                'matched_landmark': target,
-                'observation_mismatch_mm': mismatch,
-                'pose_correction': (dx, dy),
-            }
-            print(
-                f'\n  [revisit] corrected pose by {correction_mm:.0f}mm '
-                f'toward known landmark'
-            )
-        points.append(point)
-        landmarks.append(point)
-        known_blockers.append(point)
-        if points is walls:
-            known_wall_segments[:] = inferred_wall_segments(
-                known_walls, max_distance=cell_mm
-            )
-        if policy:
-            policy.report_progress()
-
-    def report_leg(remaining, traveled, left, right, tilt):
-        print(
-            f'  [{remaining:4.1f}s] ({x:6.0f},{y:6.0f})mm  '
-            f'hdg={heading:6.1f}°  leg={traveled:5.0f}mm  '
-            f'prox L={left:2d} R={right:2d}  tilt={tilt:+.0f}',
-            end='\r',
-        )
-
-    def handle_leg_end(
-        traveled,
-        requested_distance,
-        policy_limit_reached=False,
-        record_early_stop_obstacle=True,
-    ):
-        left = send_command('get_prox_left')['result']
-        right = send_command('get_prox_right')['result']
-        pitch = send_command('get_pitch')['result']
-        tilt = pitch - baseline_pitch
-
-        if left >= PROX_THRESHOLD or right >= PROX_THRESHOLD:
-            mark_ahead(walls, known_walls, WALL_OFFSET_MM)
-            return left, right, tilt, 'wall', WALL_SOUNDS, True
-        if abs(tilt) > PITCH_TILT_THRESHOLD:
-            mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
-            return left, right, tilt, f'tilt {tilt:+.0f}', TILT_SOUNDS, True
-        if abs(traveled) < requested_distance * 0.8:
-            if record_early_stop_obstacle:
-                mark_ahead(obstacles, known_obstacles, OBSTACLE_OFFSET_MM)
-            return left, right, tilt, 'early stop', WALL_SOUNDS, True
-        if policy_limit_reached:
-            return left, right, tilt, 'exploration boundary', None, False
-        return left, right, tilt, 'forward leg complete', None, False
-
-    def stop_safely():
-        send_command('stop')
-        send_command('say', 'bye')
-        send_command('neck_color', '#ffffff')
-
-    if command_policy:
-        print(f"\n=== Exploring preset course ===")
-    else:
-        print(f"\n=== Exploring for {duration:g}s ===")
-        print(
-            f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
-            "walls and tilt stop each leg early."
-        )
-    if policy:
-        print(policy.describe())
-    else:
-        print("  Experimental conservative exploration disabled.")
-    send_command('say', 'hi')
-    send_command('neck_color', '#00ff00')
-    if policy:
-        policy.report_progress()
-    if command_policy:
-        print(
-            f"  Command policy: {command_policy.name} "
-            f"({len(command_policy.commands)} commands)"
-        )
-    else:
-        turn_toward_knowledge('initial strategy')
+    run.announce()
+    if not command_policy:
+        run.turn_toward_knowledge('initial strategy')
         end_time = time.time() + duration
 
     try:
         if command_policy:
-            for index, command in enumerate(command_policy.commands, start=1):
-                if quality['tracking_lost']:
-                    break
-                name, value = command['command'], command['value']
-                print(
-                    f"\n  [preset {index}/{len(command_policy.commands)}] "
-                    f"{name} {value:g}"
-                )
-                if name == 'turn':
-                    for step in tracked_turn_steps(value):
-                        send_command('turn', step)
-                        if update_pose('turn', step) is None:
-                            break
-                    if quality['tracking_lost']:
-                        break
-                    policy_commands_completed = index
-                    continue
-                response = send_command(
-                    'move',
-                    value,
-                    SENSOR_SAFE_SPEED_MMPS,
-                    wall_stop_sound=None,
-                    stop_at_obstacle=command['stop_at_obstacle'],
-                )
-                if not response.get('ok', False):
-                    quality['tracking_lost'] = True
-                    issue = f"preset move command failed: {response.get('error', 'unknown error')}"
-                    quality['issues'].append(issue)
-                    events.append(
-                        {
-                            'action': 'forward',
-                            'requested': value,
-                            'accepted': False,
-                            'issues': [issue],
-                            'motion_response': response,
-                        }
-                    )
-                    print(f"\n  [preset halted] {issue}")
-                    break
-                traveled = update_pose('forward', value)
-                events[-1]['motion_outcome'] = response['result']
-                if traveled is None:
-                    break
-                left, right, tilt, reason, _, back_away = handle_leg_end(
-                    traveled,
-                    value,
-                    record_early_stop_obstacle=command['stop_at_obstacle'],
-                )
-                report_leg(0.0, traveled, left, right, tilt)
-                if back_away:
-                    print(f"\n  [preset halted] {reason}")
-                    break
-                policy_commands_completed = index
-            if policy_commands_completed == len(command_policy.commands):
-                print("\n  [preset complete] final action finished")
+            run.drive_preset_course()
         else:
-            while time.time() < end_time and not quality['tracking_lost']:
-                remaining = end_time - time.time()
-                desired_distance = forward_distance_for_remaining(remaining)
-                requested_distance = (
-                    policy.forward_distance(x, y, heading, desired_distance)
-                    if policy
-                    else desired_distance
-                )
-                policy_limit_reached = requested_distance < desired_distance
-                if requested_distance < MIN_FORWARD_DISTANCE_MM:
-                    # Pinned against the invisible territory wall. If the
-                    # territory the robot is in is fully mapped, unlock the one
-                    # ahead and re-evaluate instead of turning back.
-                    if policy and policy.expand_past_boundary(x, y, heading):
-                        continue
-                    redirect('exploration boundary')
-                    continue
-                send_command(
-                    'move',
-                    requested_distance,
-                    FORWARD_SPEED_MMPS,
-                    wall_stop_sound=None,
-                )
-                traveled = update_pose('forward', requested_distance)
-                remaining = max(0.0, end_time - time.time())
-                if traveled is None:
-                    left = send_command('get_prox_left')['result']
-                    right = send_command('get_prox_right')['result']
-                    tilt = send_command('get_pitch')['result'] - baseline_pitch
-                    reason, sounds, back_away = 'odometry rejected', None, False
-                    traveled = 0.0
-                    report_leg(remaining, traveled, left, right, tilt)
-                    break
-                else:
-                    left, right, tilt, reason, sounds, back_away = handle_leg_end(
-                        traveled,
-                        requested_distance,
-                        policy_limit_reached,
-                    )
-                report_leg(remaining, traveled, left, right, tilt)
-
-                if time.time() < end_time:
-                    redirect(reason, sounds, back_away, left, right)
-
+            run.explore_until(end_time)
     except KeyboardInterrupt:
         print('\nInterrupted.')
     finally:
-        stop_safely()
+        run.stop_safely()
 
-    print(f'\nDone. Path={len(path)} pts  Walls={len(walls)}  Obstacles={len(obstacles)}')
-    return {
-        'timestamp': datetime.now().isoformat(timespec='seconds'),
-        'duration_seconds': duration,
-        'status': 'partial' if quality['tracking_lost'] else 'accepted',
-        'quality': quality,
-        'path': path,
-        'walls': walls,
-        'obstacles': obstacles,
-        **({policy.metadata_key: policy.metadata()} if policy else {}),
-        **(
-            {
-                'exploration_policy': {
-                    **command_policy.metadata(),
-                    'commands_completed': policy_commands_completed,
-                    'completed': (
-                        policy_commands_completed == len(command_policy.commands)
-                    ),
-                }
-            }
-            if command_policy
-            else {}
-        ),
-        'events': events,
-    }
+    print(
+        f'\nDone. Path={len(run.path)} pts  '
+        f'Walls={len(run.walls)}  Obstacles={len(run.obstacles)}'
+    )
+    return run.result()
 
 
 # ---------------------------------------------------------------------------
