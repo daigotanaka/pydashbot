@@ -733,8 +733,24 @@ class MappingStrategyTests(unittest.TestCase):
         dx, dy, target, mismatch = correction
         self.assertEqual(target, (150, 100))
         self.assertEqual(mismatch, 100)
-        self.assertEqual(dx, -60)
+        # Correction is capped at LOOP_CLOSURE_MAX_CORRECTION_MM (a 100 mm
+        # mismatch * 0.6 gain would be 60, but the bound is 50).
+        self.assertEqual(dx, -50)
         self.assertEqual(dy, 0)
+
+    def test_revisit_pose_correction_rejects_far_landmark_match(self):
+        # A wall observation far from any known landmark is a different wall, not
+        # drift, so it must not snap the pose toward it.
+        self.assertGreater(200, map_room.LOOP_CLOSURE_MATCH_RADIUS_MM)
+        self.assertIsNone(
+            map_room.revisit_pose_correction(
+                100,
+                100,
+                (300, 100),  # 200 mm from the only landmark
+                [(100, 100)],
+                [(500, 100)],
+            )
+        )
 
     def test_revisit_pose_correction_ignores_unrecognized_area(self):
         self.assertIsNone(

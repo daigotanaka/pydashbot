@@ -98,9 +98,16 @@ ODOMETRY_MAX_TURN_DISTANCE_MM = 150
 # (heading = (right - left) * mm_per_wheel_tick / track_width); see README.
 TRACK_WIDTH_MM = 87.0
 ODOMETRY_SLIP_HEADING_DEG = 45
-LOOP_CLOSURE_MATCH_RADIUS_MM = 350
-LOOP_CLOSURE_PATH_RADIUS_MM = 700
-LOOP_CLOSURE_MAX_CORRECTION_MM = 250
+# Loop closure must be a small drift nudge against a genuinely co-located wall,
+# not a teleport toward a different wall. A wide match radius binds an
+# observation to the wrong wall and a large max correction then jumps the pose
+# hundreds of mm, corrupting the map (observed up to 327 mm "matches" snapping
+# the pose ~250 mm). Keep the match tight (same wall, modest drift) and the
+# correction genuinely bounded; under-correcting drift is far safer than
+# snapping to the wrong landmark.
+LOOP_CLOSURE_MATCH_RADIUS_MM = 120
+LOOP_CLOSURE_PATH_RADIUS_MM = 400
+LOOP_CLOSURE_MAX_CORRECTION_MM = 50
 LOOP_CLOSURE_GAIN = 0.6
 HOME_ROUTE_LINK_RADIUS_MM = 250
 HOME_ROUTE_COLLINEAR_DEG = 12
