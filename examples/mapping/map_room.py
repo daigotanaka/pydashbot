@@ -81,7 +81,11 @@ PITCH_TILT_THRESHOLD = 40
 DURATION          = 60
 WALL_OFFSET_MM    = 150
 OBSTACLE_OFFSET_MM = 100
-DOCK_CLEARANCE_MM = 80    # back off this far from each wall after contact
+DOCK_CLEARANCE_MM = 80    # go-home rear re-reference back-off distance
+# Assumed center-to-wall distance once the dock reaches IR contact (no extra
+# clearance move is made). This is the value the origin is set to; calibrate it
+# by measuring the docked robot's center-to-wall distance.
+DOCK_ORIGIN_OFFSET_MM = 80
 INITIAL_HEADING_ANGLES = [0, -30, 30, -60, 60, -90, 90, -120, 120, -150, 150, 180]
 REDIRECT_ANGLES = [-45, 45, -60, 60, -90, 90, -120, 120, -150, 150, 180]
 STRATEGY_SAMPLE_DISTANCES = [400, 800, 1200, 1600]
@@ -656,11 +660,7 @@ def dock_to_corner(deg_per_yaw, mm_per_wd):
     send_command('say', 'okay')
     time.sleep(0.3)
 
-    # Clear slightly from rear wall
-    send_command('move', DOCK_CLEARANCE_MM, 80)
-    time.sleep(0.2)
-
-    # -- Step 2: turn left, crawl into side wall --
+    # -- Step 2: turn left (CCW) to face the side wall, then crawl into it --
     print("  Turning left to find side wall...")
     send_command('turn', 90)
     time.sleep(0.2)
@@ -680,19 +680,17 @@ def dock_to_corner(deg_per_yaw, mm_per_wd):
     send_command('say', 'okay')
     time.sleep(0.3)
 
-    # Clear slightly from side wall
-    send_command('move', -DOCK_CLEARANCE_MM, 80)
-    time.sleep(0.2)
-
-    # -- Step 3: turn right to face into room --
+    # -- Step 3: turn right (CW) to face into the room --
     print("  Turning to face room...")
     send_command('turn', -90)
     time.sleep(0.3)
 
-    # Facing +x into the room, the rear wall is at x=0 and the left wall is at
-    # y=0. The room therefore lies at +x/-y from the corner.
-    x0 = float(DOCK_CLEARANCE_MM)
-    y0 = -float(DOCK_CLEARANCE_MM)
+    # The robot now sits at the IR-contact distance from each wall (no extra
+    # clearance move). Facing +x into the room, the rear wall is at x=0 and the
+    # left wall is at y=0, so the room lies at +x/-y. The origin is set to the
+    # assumed contact distance (calibrate DOCK_ORIGIN_OFFSET_MM by measuring).
+    x0 = float(DOCK_ORIGIN_OFFSET_MM)
+    y0 = -float(DOCK_ORIGIN_OFFSET_MM)
     print(f"  Docked. Starting position: ({x0:.0f}, {y0:.0f}) mm from corner, heading 0°")
     send_command('neck_color', '#00ffff')
     return x0, y0
