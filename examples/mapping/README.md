@@ -130,18 +130,11 @@ The mapper uses this fixed docking sequence to establish the starting pose and
 orientation:
 
 1. Reverse until the rear proximity sensor detects the first wall.
-2. Turn left 90° (counter-clockwise) to face the adjacent wall.
-3. Drive forward until a front proximity sensor detects the adjacent wall.
-4. Turn right 90° (clockwise) to face into the room.
-
-Place the robot so both walls are *behind* and *to the left* — they may start
-beyond sensor range, since steps 1 and 3 drive until the sensors pick them up.
-The robot ends at the IR-contact distance from each wall (there is no extra
-clearance move), so the recorded origin assumes that contact distance
-(`DOCK_ORIGIN_OFFSET_MM`). Note the IR proximity reading is reflected-light
-*intensity*, not a calibrated distance, so the contact point is approximate and
-surface-dependent; `DOCK_ORIGIN_OFFSET_MM` should be calibrated by measuring the
-docked robot's center-to-wall distance.
+2. Move forward 80 mm to clear that wall.
+3. Turn left 90 degrees.
+4. Drive forward until a front proximity sensor detects the adjacent wall.
+5. Reverse 80 mm to clear that wall.
+6. Turn right 90 degrees to face into the room.
 
 The resulting coordinate frame uses heading `0°` along `+x` into the room.
 Because the adjacent wall is on Dash's left, that wall is at `y=0` and open
