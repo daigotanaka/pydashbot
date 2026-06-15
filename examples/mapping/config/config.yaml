@@ -15,7 +15,7 @@ territory_size_mm: 1000
 # Exploration policies are ordered by priority; the first policy drives.
 # policy:
 #   - name: preset
-#    input_file: data/course.json
+#    input_file: data/preset_courses/course.json
 
 # Available go-home strategies:
 # - d-star-lite

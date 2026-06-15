@@ -81,7 +81,8 @@ PITCH_TILT_THRESHOLD = 40
 DURATION          = 60
 WALL_OFFSET_MM    = 150
 OBSTACLE_OFFSET_MM = 100
-DOCK_CLEARANCE_MM = 80    # back off this far from each wall after contact
+DOCK_CLEARANCE_MM = 310    # back off this far from each wall after contact
+DOCK_WALL_SEARCH_MM = 500  # max travel to find each wall during docking
 INITIAL_HEADING_ANGLES = [0, -30, 30, -60, 60, -90, 90, -120, 120, -150, 150, 180]
 REDIRECT_ANGLES = [-45, 45, -60, 60, -90, 90, -120, 120, -150, 150, 180]
 STRATEGY_SAMPLE_DISTANCES = [400, 800, 1200, 1600]
@@ -627,72 +628,92 @@ def load_calibration(cal_file=None):
 
 
 # ---------------------------------------------------------------------------
-# Corner dock — establishes (0, 0) as the corner, robot ends up facing room
+# Corner dock — establishes (0, 0) as the corner, rear and left walls detected
 # ---------------------------------------------------------------------------
-def dock_to_corner(deg_per_yaw, mm_per_wd):
-    """Back into rear wall, then crawl into left side wall to find corner."""
+def dock_to_corner(deg_per_yaw, mm_per_wd, wait_sec=15):
+    """Back into rear wall, turn CCW to face left wall, advance into it, turn CCW.
+
+    Placement: robot at the dock corner with a wall behind it and a wall to its
+    left.  Both walls may be out of sensor range until the robot moves toward
+    them.  The two 90° CCW turns leave the robot at the corner with both walls
+    within known sensor-intensity ranges, giving a consistent origin.
+    """
     print("\n=== Corner Dock ===")
-    print("  Place robot near a corner, back toward one wall, left side toward")
-    print("  the adjacent wall. Starting in 15 seconds...")
-    for i in range(15, 0, -1):
+    print("  Place robot at dock corner: wall behind the robot AND wall to its left.")
+    print("  Both walls may be out of sensor range initially.")
+    print(f"  Starting in {wait_sec} seconds...")
+    for i in range(wait_sec, 0, -1):
         print(f'  {i}...', end='\r')
         if i == 5:
             send_command('say', 'beep')
         time.sleep(1)
     print()
 
-    # -- Step 1: back into rear wall --
-    print("  Backing into rear wall...")
-    send_command('drive', -DOCK_SPEED)
-    while True:
+    # -- Step 1: back into rear wall (max DOCK_WALL_SEARCH_MM travel) --
+    print(f"  Backing toward rear wall (max {DOCK_WALL_SEARCH_MM}mm)...")
+    outcome = send_command(
+        'move', -DOCK_WALL_SEARCH_MM, DOCK_SPEED,
+        wall_stop_sound=None,
+    ).get('result')
+    found_rear = (
+        isinstance(outcome, dict)
+        and outcome.get('halt') == 'obstacle'
+        and outcome.get('side') == 'rear'
+    )
+    if not found_rear:
+        print(
+            f"  *** Rear wall not detected within {DOCK_WALL_SEARCH_MM}mm — "
+            "check robot placement! ***"
+        )
+        send_command('say', 'ohno')
+    else:
         rear = send_command('get_prox_rear')['result']
-        print(f'    prox_rear={rear}', end='\r')
-        if rear >= REAR_THRESHOLD:
-            send_command('stop')
-            print(f'\n  Rear wall contact (prox_rear={rear})')
-            break
-        time.sleep(POLL_INTERVAL)
-
-    send_command('say', 'okay')
+        print(f'\n  Rear wall contact (prox_rear={rear})')
+        send_command('say', 'okay')
     time.sleep(0.3)
 
-    # Clear slightly from rear wall
-    send_command('move', DOCK_CLEARANCE_MM, 80)
-    time.sleep(0.2)
-
-    # -- Step 2: turn left, crawl into side wall --
-    print("  Turning left to find side wall...")
+    # -- Step 2: turn 90° CCW to face the left wall --
+    print("  Turning 90° counter-clockwise to face left wall...")
     send_command('turn', 90)
     time.sleep(0.2)
 
-    print("  Crawling into side wall...")
-    send_command('drive', DOCK_SPEED)
-    while True:
+    # -- Step 3: advance into left wall (max DOCK_WALL_SEARCH_MM travel) --
+    print(f"  Moving toward left wall (max {DOCK_WALL_SEARCH_MM}mm)...")
+    outcome = send_command(
+        'move', DOCK_WALL_SEARCH_MM, DOCK_SPEED,
+        wall_stop_sound=None,
+    ).get('result')
+    found_left = (
+        isinstance(outcome, dict)
+        and outcome.get('halt') == 'obstacle'
+        and outcome.get('side') == 'front'
+    )
+    if not found_left:
+        print(
+            f"  *** Left wall not detected within {DOCK_WALL_SEARCH_MM}mm — "
+            "check robot placement! ***"
+        )
+        send_command('say', 'ohno')
+    else:
         l = send_command('get_prox_left')['result']
         r = send_command('get_prox_right')['result']
-        print(f'    prox L={l} R={r}', end='\r')
-        if l >= PROX_THRESHOLD or r >= PROX_THRESHOLD:
-            send_command('stop')
-            print(f'\n  Side wall contact (prox L={l} R={r})')
-            break
-        time.sleep(POLL_INTERVAL)
-
-    send_command('say', 'okay')
+        print(f'\n  Left wall contact (prox L={l} R={r})')
+        send_command('say', 'okay')
     time.sleep(0.3)
 
-    # Clear slightly from side wall
-    send_command('move', -DOCK_CLEARANCE_MM, 80)
-    time.sleep(0.2)
-
-    # -- Step 3: turn right to face into room --
-    print("  Turning to face room...")
+    # -- Step 4: turn 90° CCW — now rear wall is ahead, left wall to the right --
+    print("  Turning 90° clockwise...")
     send_command('turn', -90)
     time.sleep(0.3)
 
-    # Facing +x into the room, the rear wall is at x=0 and the left wall is at
-    # y=0. The room therefore lies at +x/-y from the corner.
-    x0 = float(DOCK_CLEARANCE_MM)
-    y0 = -float(DOCK_CLEARANCE_MM)
+    # Both walls are now within known proximity-sensor ranges: the rear wall is
+    # directly ahead and the left wall is to the right.  This gives a consistent
+    # corner reference regardless of where within the acceptable placement zone
+    # the user set the robot down initially.
+    # The robot's rotation axis sits ~310mm east (+x) and ~310mm south (-y) of
+    # the corner (where the rear wall and left wall meet), measured physically.
+    x0 = 310.0
+    y0 = -310.0
     print(f"  Docked. Starting position: ({x0:.0f}, {y0:.0f}) mm from corner, heading 0°")
     send_command('neck_color', '#00ffff')
     return x0, y0
