@@ -370,13 +370,18 @@ size, `territory-size / 4` — e.g. 250 mm for the 1 m default, 500 mm for a
 2 m territory) are treated as a continuous wall segment by the core exploration
 planner, including when conservative exploration is disabled. Tying the link
 distance to the cell size keeps wall inference at the same scale as the
-reachability grid, so a smaller territory links walls more finely. These
-inferred segments prevent repeated sampling between nearby observations, but
-remain planning-only evidence and are never added to the JSON `walls` points.
+reachability grid, so a smaller territory links walls more finely. The links
+form a sparse relative-neighborhood graph: nearby observations make continuous
+chains, but an observation between two points suppresses the unsupported chord
+across that cluster. Inferred segments prevent repeated sampling between nearby
+observations, but remain planning-only evidence and are never added to the JSON
+`walls` points.
 Conservative reachability consumes the same shared segments when enabled, but
-uses a narrower clearance than motion avoidance. Motion planning keeps 150 mm
-away from a wall for safety; reachability uses 100 mm because a wall merely
-near a connection between cell centers does not necessarily separate the cells.
+uses segment-to-segment intersection with only a small observation tolerance.
+Motion planning keeps 150 mm away from a wall for safety; reachability marks
+cells disconnected only when inferred wall geometry actually separates their
+cell-center connection. A wall merely near a connection does not make the
+neighbor unreachable.
 
 The mapper reports major progress to stdout with `[cell complete]`,
 `[territory complete]`, and `[adjacent territory unlocked]` messages. Territory
@@ -472,21 +477,31 @@ parent's territory constraint machinery and changes six things:
   `clearance` — a heading into finished territory then scores as no-progress
   while a heading into still-uncharted (frontier-bearing) territory stays open.
   Transit into uncharted neighbors is unaffected (they are not "completed").
+  The selected expansion's source territory is also exempt, so Dash can return
+  to that completed territory to reach its committed boundary crossing.
 - **Position-driven territory creation.** `_unlock_new_territory` is overridden
   to a no-op, so the policy never unlocks a territory *abstractly*. New
   territories are created only by `expand_past_boundary` — when the robot is
   physically pinned at a boundary heading into un-unlocked space.
 - **Committed territory expansion.** After finishing a territory, the policy
-  selects one directed territory expansion and one plausible crossing area on
-  the shared boundary. It keeps pursuing that expansion across turns and
-  resumed runs instead of rewarding whichever adjacent territory happens to
-  align with each candidate heading.
+  first finishes every currently unlocked territory, then selects one directed
+  territory expansion and one plausible crossing area on the shared boundary.
+  It keeps pursuing that expansion across turns and resumed runs instead of
+  rewarding whichever adjacent territory happens to align with each candidate
+  heading. Expansion remains dormant while any unlocked territory still has
+  reachable frontier, preventing a future expansion from pulling Dash back out
+  of its current coverage work.
 - **Physical-blockage learning and completion.** A wall or obstacle encountered
   during expansion removes the attempted crossing area. The directed expansion
   is marked blocked only after no plausible crossing remains, and blocked
   expansions persist across runs. When every unlocked territory is explored
   and no open expansion remains, coverage ends instead of driving until the
   time limit.
+- **Territory-transition validation.** A forward leg that reports a wall,
+  obstacle, or early stop cannot commit an odometry transition into another
+  territory. Its translated pose is rolled back before the blocker is recorded.
+  Loop-closure correction is likewise prevented from moving a bounded-policy
+  pose across a territory boundary.
 
 Why position-driven: abstract unlocking (the parent's behavior) plus premature
 abandonment plus the boundary clamp interact catastrophically — a focus the

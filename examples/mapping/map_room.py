@@ -27,6 +27,7 @@ try:
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
+        territory_cell,
     )
     from examples.mapping.coverage_exploration import CoverageExploration
     from examples.mapping.exploration_policy import NoveltyExplorationPolicy
@@ -47,6 +48,7 @@ except ModuleNotFoundError:
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
+        territory_cell,
     )
     from coverage_exploration import CoverageExploration
     from exploration_policy import NoveltyExplorationPolicy
@@ -1296,6 +1298,32 @@ class _ExplorationRun:
         send_command('neck_color', '#00ff00')
 
     # -- observations ------------------------------------------------------
+    def reject_blocked_territory_transition(self, previous_position, known_path_len):
+        """Discard translation into another territory when the leg was blocked."""
+        if not isinstance(self.policy, ConservativeExploration):
+            return False
+        previous_territory = territory_cell(
+            previous_position[0], previous_position[1], self.policy.territory_mm
+        )
+        current_territory = territory_cell(
+            self.x, self.y, self.policy.territory_mm
+        )
+        if current_territory == previous_territory:
+            return False
+
+        self.x, self.y = previous_position
+        self.path[-1] = (self.x, self.y, self.heading)
+        del self.known_path[known_path_len:]
+        self.events[-1]['territory_transition_rejected'] = {
+            'from': previous_territory,
+            'to': current_territory,
+        }
+        print(
+            f'\n  [territory transition rejected] blocked leg cannot move '
+            f'from {previous_territory} to {current_territory}'
+        )
+        return True
+
     def mark_ahead(self, points, landmarks, offset):
         if self.quality['tracking_lost']:
             return
@@ -1308,6 +1336,16 @@ class _ExplorationRun:
             self.known_path[:-1],
             landmarks,
         )
+        if correction:
+            dx, dy, target, mismatch = correction
+            if (
+                isinstance(self.policy, ConservativeExploration)
+                and territory_cell(
+                    self.x + dx, self.y + dy, self.policy.territory_mm
+                )
+                != territory_cell(self.x, self.y, self.policy.territory_mm)
+            ):
+                correction = None
         if correction:
             dx, dy, target, mismatch = correction
             self.x += dx
@@ -1353,6 +1391,8 @@ class _ExplorationRun:
         requested_distance,
         policy_limit_reached=False,
         record_early_stop_obstacle=True,
+        previous_position=None,
+        known_path_len=None,
     ):
         left = send_command('get_prox_left')['result']
         right = send_command('get_prox_right')['result']
@@ -1360,12 +1400,20 @@ class _ExplorationRun:
         tilt = pitch - self.baseline_pitch
 
         if left >= PROX_THRESHOLD or right >= PROX_THRESHOLD:
+            if previous_position is not None:
+                self.reject_blocked_territory_transition(
+                    previous_position, known_path_len
+                )
             self.mark_ahead(self.walls, self.known_walls, WALL_OFFSET_MM)
             self.policy.add_blocked_territory_expansion(
                 self.x, self.y, self.heading
             )
             return left, right, tilt, 'wall', WALL_SOUNDS, True
         if abs(tilt) > PITCH_TILT_THRESHOLD:
+            if previous_position is not None:
+                self.reject_blocked_territory_transition(
+                    previous_position, known_path_len
+                )
             self.mark_ahead(self.obstacles, self.known_obstacles, OBSTACLE_OFFSET_MM)
             self.policy.add_blocked_territory_expansion(
                 self.x, self.y, self.heading
@@ -1373,6 +1421,10 @@ class _ExplorationRun:
             return left, right, tilt, f'tilt {tilt:+.0f}', TILT_SOUNDS, True
         if abs(traveled) < requested_distance * 0.8:
             if record_early_stop_obstacle:
+                if previous_position is not None:
+                    self.reject_blocked_territory_transition(
+                        previous_position, known_path_len
+                    )
                 self.mark_ahead(
                     self.obstacles, self.known_obstacles, OBSTACLE_OFFSET_MM
                 )
@@ -1494,6 +1546,8 @@ class _ExplorationRun:
                 FORWARD_SPEED_MMPS,
                 wall_stop_sound=None,
             )
+            previous_position = (self.x, self.y)
+            known_path_len = len(self.known_path)
             traveled = self.update_pose('forward', requested_distance)
             remaining = max(0.0, end_time - time.time())
             if traveled is None:
@@ -1509,6 +1563,8 @@ class _ExplorationRun:
                     traveled,
                     requested_distance,
                     policy_limit_reached,
+                    previous_position=previous_position,
+                    known_path_len=known_path_len,
                 )
             self.report_leg(remaining, traveled, left, right, tilt)
 

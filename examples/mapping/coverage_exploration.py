@@ -155,7 +155,14 @@ class CoverageExploration(ConservativeExploration):
             )
             if cell != last_cell:
                 last_cell = cell
-                if cell != current and self.territory_explored(cell):
+                if (
+                    cell != current
+                    and self.territory_explored(cell)
+                    and (
+                        self.active_territory_expansion is None
+                        or cell != self.active_territory_expansion[0]
+                    )
+                ):
                     return int(
                         max(0, distance - WALL_SAMPLE_MM - WALL_CLEARANCE_MM)
                     )
@@ -230,6 +237,13 @@ class CoverageExploration(ConservativeExploration):
 
     def _select_territory_expansion(self):
         """Keep the active expansion stable, or select the nearest open crossing."""
+        if any(not self.territory_explored(cell) for cell in self.territories):
+            # Finish unlocked work before planning growth. Otherwise a future
+            # expansion's completed source is exempted by forward_distance and
+            # can pull the robot out of the territory it is still covering.
+            self.active_territory_expansion = None
+            self.active_expansion_crossing = None
+            return
         expansions = self.get_territory_expansions()
         x, y = self.path_points[-1] if self.path_points else (0.0, 0.0)
         if self.active_territory_expansion in expansions:

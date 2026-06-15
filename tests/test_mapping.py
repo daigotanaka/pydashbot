@@ -756,6 +756,26 @@ class MappingStrategyTests(unittest.TestCase):
             )
         )
 
+    def test_blocked_leg_cannot_commit_conservative_territory_transition(self):
+        run = object.__new__(map_room._ExplorationRun)
+        run.x, run.y, run.heading = 250, 100, 90
+        run.path = [(250, -100, 90), (250, 100, 90)]
+        run.known_path = [(250, -100), (250, 100)]
+        run.events = [{}]
+        run.policy = conservative.ConservativeExploration(
+            [], (250, -100), [(250, -100)], [], territory_mm=1000
+        )
+
+        self.assertTrue(
+            run.reject_blocked_territory_transition((250, -100), 1)
+        )
+        self.assertEqual((run.x, run.y), (250, -100))
+        self.assertEqual(run.known_path, [(250, -100)])
+        self.assertEqual(
+            run.events[-1]['territory_transition_rejected'],
+            {'from': (0, -1), 'to': (0, 0)},
+        )
+
     def test_strategy_avoids_known_blockers(self):
         blockers = [(400, 0), (800, 0), (1200, 0)]
         angle = map_room.choose_exploration_angle(0, 0, 0, blockers)

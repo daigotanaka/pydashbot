@@ -150,6 +150,14 @@ class ConservativeExplorationTests(unittest.TestCase):
         self.assertEqual(len(exploration_walls.inferred_wall_segments(nearby)), 1)
         self.assertEqual(exploration_walls.inferred_wall_segments(distant), [])
 
+    def test_inferred_wall_segments_do_not_fill_cluster_with_chords(self):
+        points = [(0, 0), (100, 0), (200, 0)]
+
+        self.assertEqual(
+            exploration_walls.inferred_wall_segments(points),
+            [((0, 0), (100, 0)), ((100, 0), (200, 0))],
+        )
+
     def test_inferred_wall_segment_blocks_crossing_without_blocking_around_it(self):
         wall_segments = exploration_walls.inferred_wall_segments(
             [(500, 100), (500, 400)]
@@ -169,13 +177,22 @@ class ConservativeExplorationTests(unittest.TestCase):
             )
         )
 
-    def test_inferred_wall_near_transition_start_blocks_crossing(self):
-        wall_segments = [((150, 190), (350, 190))]
+    def test_inferred_wall_crossing_near_transition_start_blocks_connection(self):
+        wall_segments = [((150, 260), (350, 260))]
         self.assertTrue(
-            exploration_walls.segment_crosses_wall(
+            exploration_walls.segment_intersects_wall(
                 (250, 250),
                 (250, 750),
                 wall_segments,
+            )
+        )
+
+    def test_disjoint_collinear_wall_does_not_block_connection(self):
+        self.assertFalse(
+            exploration_walls.segment_intersects_wall(
+                (0, 0),
+                (100, 0),
+                [((200, 0), (300, 0))],
             )
         )
 
@@ -198,11 +215,30 @@ class ConservativeExplorationTests(unittest.TestCase):
         self.assertIn((2, 2), resolution["frontier"])
         self.assertIn((1, 1), resolution["frontier"])
 
+    def test_wall_beside_visited_cell_does_not_cut_off_territory(self):
+        # Regression from data/room_map.json: the short wall lies beside the
+        # visited entry cell but does not cross either connection into the rest
+        # of the territory.
+        wall_segments = [
+            ((-148.3, 14.5), (-142.6, -113.2)),
+        ]
+        resolution = conservative.territory_resolution(
+            (-1, -1),
+            [(-125, -125)],
+            [],
+            wall_segments,
+            territory_mm=1000,
+        )
+
+        self.assertNotIn((2, 3), resolution["unreachable"])
+        self.assertIn((3, 2), resolution["frontier"])
+        self.assertIn((0, 0), resolution["frontier"])
+
     def test_wall_samples_resolve_cells_behind_wall_and_unlock_south(self):
         bottom_row = [(x, 250) for x in (250, 750, 1250, 1750)]
         south_path = [(750, -250)]
         wall_segments = [
-            ((x - 100, 190), (x + 100, 190))
+            ((x - 100, 500), (x + 100, 500))
             for x in (250, 750, 1250, 1750)
         ]
         resolution = conservative.territory_resolution(
@@ -231,7 +267,7 @@ class ConservativeExplorationTests(unittest.TestCase):
         bottom_row = [(x, 250) for x in (250, 750, 1250, 1750)]
         south_path = [(750, -250)]
         wall_segments = [
-            ((x - 100, 190), (x + 100, 190))
+            ((x - 100, 500), (x + 100, 500))
             for x in (250, 750, 1250, 1750)
         ]
         runs = [

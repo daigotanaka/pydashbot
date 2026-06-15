@@ -161,6 +161,55 @@ class CoverageExplorationTests(unittest.TestCase):
         into_uncharted = policy.heading_preference(500, -1100, -90)  # south, stays in (0,-2)
         self.assertGreater(into_uncharted, into_completed)
 
+    def test_can_transit_into_completed_active_expansion_source(self):
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1], [0, 0]],
+                    "focus_territory": [0, -1],
+                    "active_territory_expansion": [[0, 0], [-1, 0]],
+                }
+            }
+        ]
+        north_filled = [
+            (cx * 250 + 125, cy * 250 + 125)
+            for cx in range(4)
+            for cy in range(4)
+        ]
+        path = list(FULLY_EXPLORED_SOUTH) + north_filled + [(500, -500)]
+        policy = CoverageExploration(
+            runs, path[-1], path, [], territory_mm=1000
+        )
+
+        self.assertTrue(policy.territory_explored((0, 0)))
+        self.assertGreater(
+            policy.forward_distance(500, -500, 90, 2000),
+            1000,
+        )
+
+    def test_does_not_plan_expansion_while_unlocked_territory_is_unfinished(self):
+        runs = [
+            {
+                "conservative_exploration": {
+                    "territories": [[0, -1], [0, 0]],
+                    "focus_territory": [0, 0],
+                    "active_territory_expansion": [[0, -1], [-1, -1]],
+                }
+            }
+        ]
+        path = list(FULLY_EXPLORED_SOUTH) + [(500, 250)]
+        policy = CoverageExploration(
+            runs, path[-1], path, [], territory_mm=1000
+        )
+
+        policy.unlock_if_complete()
+
+        self.assertIsNone(policy.active_territory_expansion)
+        self.assertLess(
+            policy.forward_distance(500, 250, -90, 2000),
+            500,
+        )
+
     def test_does_not_unlock_new_territories_abstractly(self):
         # Both unlocked territories are finished and there is no adjacent
         # unfinished one; coverage must not abstractly grow the territory set
