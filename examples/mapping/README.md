@@ -541,6 +541,72 @@ This section is the single list of current mapping and navigation challenges.
 Completed behavior and historical design decisions remain documented in their
 respective sections above.
 
+### Generalized Corridor Routing: Unify Go-Home And Frontier Navigation
+
+Today, navigating from the dock to a distant frontier (for example, `start`
+with an existing map whose `focus_territory` is several territories away)
+does **not** use a corridor-aware path plan. `CoverageExploration.heading_preference`
+only reasons about frontier cells *inside* `self.focus`; once a forward leg
+cannot directly enter one of those cells (because they are out of this leg's
+reach), it falls back to scoring headings by straight-line alignment toward
+the nearest frontier cell's center (`best_alignment * FRONTIER_HEADING_WEIGHT`,
+and `_aim_toward_expansion`'s similar alignment-to-crossing-point scoring).
+That alignment score is combined with `heading_score`'s reactive,
+sensor-driven obstacle avoidance — there is no notion of a previously-proven
+corridor, so Dash re-discovers the route to a distant focus territory leg by
+leg, the same way it explores unknown space, even though the map already
+records exactly how it got there the first time.
+
+This is a different mechanism from go-home's `DStarLiteStrategy`
+(`examples/mapping/go_home_strategies.py`), which builds a graph from path
+segments already driven, links nearby/collinear segments, and plans a route
+through that graph — explicitly preferring known-clear corridors and
+replanning around recorded blockages. Go-home has this; frontier-seeking
+during `start`/`resume` does not.
+
+**Proposed generalization:** lift the corridor-graph machinery out of its
+current "return-to-dock" framing and expose it as a reusable point-to-point
+router: given a start `(territory, cell)` and a target `(territory, cell)`,
+return a route along the known-corridor graph, replanning around blocked
+edges exactly as go-home does today. Both call sites would use the same
+router:
+
+- **Go-home** keeps using it with the goal fixed at the saved start pose
+  (today's behavior, just routed through the generalized interface instead of
+  a `go_home`-specific code path).
+- **Frontier/expansion approach** would call it with the goal set to the
+  current focus territory's frontier (or the active territory-expansion's
+  crossing point), replacing the straight-line alignment fallback in
+  `heading_preference`/`_aim_toward_expansion` with an actual route through
+  previously-driven corridors, only falling back to undirected/reactive
+  exploration once the route runs out — i.e. once Dash is genuinely off the
+  known map and must explore to find the rest of the way.
+
+This is flagged as two pieces of work, not one:
+
+1. **Refactoring.** The route-planning strategy (`GoHomeStrategy` /
+   `DStarLiteStrategy` / `HardBlockedEdgeStrategy`) is currently parameterized
+   around "drive home" specifics (start pose, `accepted_runs`,
+   `run_pose_trustworthy`). Generalizing it means separating "build a corridor
+   graph from the map" from "plan a route between two arbitrary points on that
+   graph" from "drive the route, handling blockages," so a policy can call the
+   planning/driving pieces with any goal, not just home.
+2. **Algorithm work.** Today's corridor graph is built at the whole-map
+   path-segment scale (`HOME_ROUTE_LINK_RADIUS_MM`, `HOME_ROUTE_COLLINEAR_DEG`),
+   while frontier targets are expressed at the conservative-exploration cell
+   grid scale. Deciding how a route should terminate at (or hand off to) a
+   specific cell inside a specific territory — and how blocked-edge learning,
+   the obstacle-relaxation heuristics used while retracing, and the safety
+   constraints already established for go-home (never invent a shortcut
+   through unknown space, abort on rejected odometry, etc.) carry over to a
+   goal that is not "home" — needs design before implementation.
+
+Relevant code: `DStarLiteStrategy`, `HardBlockedEdgeStrategy`, `plan_route` in
+`examples/mapping/go_home_strategies.py`; `go_home`, `go_home_with_retries` in
+`examples/mapping/map_room.py`; `CoverageExploration.heading_preference`,
+`_aim_toward_expansion`, `_select_territory_expansion` in
+`examples/mapping/coverage_exploration.py`.
+
 ### Local Detour Exploration
 
 The planner reroutes only through space it has already proven. When every known
