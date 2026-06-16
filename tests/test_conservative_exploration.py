@@ -198,8 +198,10 @@ class ConservativeExplorationTests(unittest.TestCase):
 
     def test_nearby_wall_does_not_cut_off_reachable_neighbor(self):
         # Regression from data/room_map.json: this short wall segment is wholly
-        # inside neighboring cell (2, 3). It is close enough for conservative
-        # motion avoidance, but it does not separate visited (1, 3) from (1, 2).
+        # inside neighboring cell (2, 3), ~136mm from the (1, 3)-(1, 2)
+        # connection -- still outside CORRIDOR_HALF_CLEARANCE_MM (125mm), so it
+        # is close enough for conservative motion avoidance, but it does not
+        # separate visited (1, 3) from (1, 2).
         wall_segments = [
             ((510.9, -1176.9), (542.7, -1079.2)),
         ]
@@ -215,10 +217,13 @@ class ConservativeExplorationTests(unittest.TestCase):
         self.assertIn((2, 2), resolution["frontier"])
         self.assertIn((1, 1), resolution["frontier"])
 
-    def test_wall_beside_visited_cell_does_not_cut_off_territory(self):
-        # Regression from data/room_map.json: the short wall lies beside the
-        # visited entry cell but does not cross either connection into the rest
-        # of the territory.
+    def test_wall_too_close_to_visited_cell_cuts_off_territory(self):
+        # From data/room_map.json: this short wall sits only ~12-21mm from the
+        # connections out of the visited entry cell. The robot is measured at
+        # 180-190mm wide and needs a real MIN_CORRIDOR_OPENING_MM-wide gap (see
+        # conservative_exploration.py) to trust a passage, so a wall this close
+        # genuinely blocks both connections -- it does not merely sit "beside"
+        # the path with room to spare.
         wall_segments = [
             ((-148.3, 14.5), (-142.6, -113.2)),
         ]
@@ -230,9 +235,9 @@ class ConservativeExplorationTests(unittest.TestCase):
             territory_mm=1000,
         )
 
-        self.assertNotIn((2, 3), resolution["unreachable"])
-        self.assertIn((3, 2), resolution["frontier"])
-        self.assertIn((0, 0), resolution["frontier"])
+        self.assertIn((2, 3), resolution["unreachable"])
+        self.assertIn((3, 2), resolution["unreachable"])
+        self.assertIn((0, 0), resolution["unreachable"])
 
     def test_wall_samples_resolve_cells_behind_wall_and_unlock_south(self):
         bottom_row = [(x, 250) for x in (250, 750, 1250, 1750)]

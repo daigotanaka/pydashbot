@@ -631,12 +631,13 @@ def load_calibration(cal_file=None):
 # Corner dock — establishes (0, 0) as the corner, rear and left walls detected
 # ---------------------------------------------------------------------------
 def dock_to_corner(deg_per_yaw, mm_per_wd, wait_sec=15):
-    """Back into rear wall, turn CCW to face left wall, advance into it, turn CCW.
+    """Back into rear wall, turn CCW to face left wall, advance into it, turn CW.
 
     Placement: robot at the dock corner with a wall behind it and a wall to its
     left.  Both walls may be out of sensor range until the robot moves toward
-    them.  The two 90° CCW turns leave the robot at the corner with both walls
-    within known sensor-intensity ranges, giving a consistent origin.
+    them.  The CCW-then-CW turns leave the robot facing back into the room (net
+    heading unchanged) with both walls now within known sensor-intensity
+    ranges, giving a consistent origin regardless of initial placement.
     """
     print("\n=== Corner Dock ===")
     print("  Place robot at dock corner: wall behind the robot AND wall to its left.")
@@ -701,13 +702,13 @@ def dock_to_corner(deg_per_yaw, mm_per_wd, wait_sec=15):
         send_command('say', 'okay')
     time.sleep(0.3)
 
-    # -- Step 4: turn 90° CCW — now rear wall is ahead, left wall to the right --
-    print("  Turning 90° clockwise...")
+    # -- Step 4: turn 90° CW — back to facing into the room (net 0° turn) --
+    print("  Turning 90° clockwise to face room...")
     send_command('turn', -90)
     time.sleep(0.3)
 
-    # Both walls are now within known proximity-sensor ranges: the rear wall is
-    # directly ahead and the left wall is to the right.  This gives a consistent
+    # Both walls were within known proximity-sensor ranges at the moment of
+    # contact in steps 1 and 3 (rear, then left). This gives a consistent
     # corner reference regardless of where within the acceptable placement zone
     # the user set the robot down initially.
     # The robot's rotation axis sits ~310mm east (+x) and ~310mm south (-y) of

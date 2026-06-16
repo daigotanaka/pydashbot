@@ -8,7 +8,6 @@ try:
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
         segment_crosses_wall,
-        segment_intersects_wall,
     )
 except ModuleNotFoundError:
     from exploration_policy import ExplorationPolicy
@@ -16,7 +15,6 @@ except ModuleNotFoundError:
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
         segment_crosses_wall,
-        segment_intersects_wall,
     )
 
 TERRITORY_MM = 1000
@@ -32,6 +30,13 @@ REVISIT_PENALTY = 8000
 NO_PROGRESS_PENALTY = 1000000
 WALL_SEGMENT_PENALTY = 500000
 WALL_SEGMENT_CLEARANCE_WEIGHT = 100
+# Measured robot width is 180-190mm; actuators/sensors are noisy enough that a
+# gap needs real margin beyond that to be trusted as passable. A cell-to-cell
+# connection is only considered open if the robot's candidate centerline stays
+# at least half this opening away from every known wall -- i.e. there is room
+# for the robot's body on both sides, not just a literal (zero-width) miss.
+MIN_CORRIDOR_OPENING_MM = 250
+CORRIDOR_HALF_CLEARANCE_MM = MIN_CORRIDOR_OPENING_MM / 2
 
 
 def territory_cell(x, y, size=TERRITORY_MM):
@@ -128,7 +133,9 @@ def territory_resolution(
                 neighbor in all_cells
                 and neighbor not in blocked
                 and neighbor not in reachable
-                and not segment_intersects_wall(*connection, wall_segments)
+                and not segment_crosses_wall(
+                    *connection, wall_segments, clearance_mm=CORRIDOR_HALF_CLEARANCE_MM
+                )
             ):
                 reachable.add(neighbor)
                 pending.append(neighbor)

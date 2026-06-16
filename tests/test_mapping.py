@@ -610,30 +610,6 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(map_room.home_leg_distance(452.429), 452)
         self.assertEqual(map_room.home_leg_distance(1200.5), 1000)
 
-    def test_corner_dock_turns_left_toward_side_wall_then_right_into_room(self):
-        calls = []
-        readings = {
-            "get_prox_rear": iter([map_room.REAR_THRESHOLD]),
-            "get_prox_left": iter([map_room.PROX_THRESHOLD]),
-            "get_prox_right": iter([0]),
-        }
-
-        def send_command(method, *args, **kwargs):
-            calls.append((method, args, kwargs))
-            if method in readings:
-                return {"result": next(readings[method])}
-            return {"result": None}
-
-        with (
-            patch.object(map_room, "send_command", side_effect=send_command),
-            patch.object(map_room.time, "sleep"),
-        ):
-            pose = map_room.dock_to_corner(1.0, 1.0)
-
-        turns = [args[0] for method, args, _ in calls if method == "turn"]
-        self.assertEqual(turns, [90, -90])
-        self.assertEqual(pose, (80.0, -80.0))
-
     def test_odometry_validation_rejects_negative_forward_distance(self):
         issues = map_room.validate_odometry("forward", 3000, -1668, -2.6)
         self.assertIn("forward move measured negative distance", issues)

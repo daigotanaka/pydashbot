@@ -59,15 +59,17 @@ exploration finishes immediately after its final action; `duration_seconds`
 does not keep it running. Remove `policy` to use the normal map-guided
 exploration strategy.
 
-The provided `data/course.json` runs this cell-conversion check from the dock
-pose `(80,-80)`:
+A preset course like this one runs a cell-conversion check from the dock pose
+(currently `(310,-310)`):
 
 ```text
 move 250, turn -90, move 250, turn -90, move 250
 ```
 
-With ideal motion, it visits `(0,-1)` cells `(0,3)`, `(1,3)`, `(1,2)`, and
-ends in `(0,2)`.
+With ideal motion and the current dock pose, it visits `(0,-1)` cells `(1,2)`,
+`(2,2)`, `(2,1)`, and ends in `(1,1)`. Recompute this if `x0`/`y0` in
+`dock_to_corner` (`examples/mapping/map_room.py`) or `territory_size_mm`
+changes.
 
 The first move sets `stop_at_obstacle: false` because it intentionally departs
 parallel to the known dock wall, which can remain visible to a front proximity
@@ -119,28 +121,39 @@ observing consistently inaccurate turns or distances.
 For a consistent map origin, place Dash near a room corner:
 
 1. Point its back roughly toward one wall.
-2. Put its left side roughly toward the adjacent wall. Dash always turns left
-   during docking, so this turn should make its front face the adjacent wall.
-3. Leave roughly 100-200 mm of clearance from both walls for docking.
-4. Point its front diagonally into the open room.
-5. Ensure the head tip and proximity sensors are unobstructed.
-6. Clear nearby cables, small objects, stairs, and drop-offs.
+2. Put its left side roughly toward the adjacent wall. Both walls may be out
+   of proximity-sensor range at this point — the docking sequence actively
+   seeks each one rather than assuming it is already detectable.
+3. Point its front diagonally into the open room.
+4. Ensure the head tip and proximity sensors are unobstructed.
+5. Clear nearby cables, small objects, stairs, and drop-offs.
 
 The mapper uses this fixed docking sequence to establish the starting pose and
 orientation:
 
-1. Reverse until the rear proximity sensor detects the first wall.
-2. Move forward 80 mm to clear that wall.
-3. Turn left 90 degrees.
-4. Drive forward until a front proximity sensor detects the adjacent wall.
-5. Reverse 80 mm to clear that wall.
-6. Turn right 90 degrees to face into the room.
+1. Reverse, seeking the rear wall, up to 500 mm. If the rear proximity sensor
+   never crosses its threshold within that distance, the mapper warns (prints
+   and speaks "ohno") and continues anyway — check robot placement if this
+   happens.
+2. Turn 90 degrees counter-clockwise to face the left wall.
+3. Drive forward, seeking that wall, up to 500 mm, with the same 500 mm cap
+   and warning if it is not found.
+4. Turn 90 degrees clockwise — net zero rotation overall, so Dash faces back
+   into the room exactly as it started.
+
+Unlike the wall-search distance, the result is *not* a clearance offset from
+each wall: Dash ends up snug against both, body against the corner. The
+starting pose is fixed at Dash's measured rotation-axis offset from that
+corner — `(310, -310)` for the current physical robot (180-190 mm wide; see
+`DOCK_CLEARANCE_MM`/`x0`/`y0` in `dock_to_corner`, `examples/mapping/map_room.py`).
+Re-measure and update those constants if the robot's body or sensor mounting
+changes.
 
 The resulting coordinate frame uses heading `0°` along `+x` into the room.
 Because the adjacent wall is on Dash's left, that wall is at `y=0` and open
 room lies toward negative `y`. Fresh maps therefore start at approximately
-`(80,-80)` in territory `(0,-1)`. Existing maps retain their saved start pose
-and coordinate frame.
+`(310,-310)` in territory `(0,-1)`. Existing maps retain their saved start
+pose and coordinate frame.
 
 It then explores until the requested duration ends:
 
@@ -376,12 +389,18 @@ chains, but an observation between two points suppresses the unsupported chord
 across that cluster. Inferred segments prevent repeated sampling between nearby
 observations, but remain planning-only evidence and are never added to the JSON
 `walls` points.
-Conservative reachability consumes the same shared segments when enabled, but
-uses segment-to-segment intersection with only a small observation tolerance.
-Motion planning keeps 150 mm away from a wall for safety; reachability marks
-cells disconnected only when inferred wall geometry actually separates their
-cell-center connection. A wall merely near a connection does not make the
-neighbor unreachable.
+Conservative reachability consumes the same shared segments when enabled, and
+marks a cell-center connection blocked when a wall comes within
+`CORRIDOR_HALF_CLEARANCE_MM` of it (half of `MIN_CORRIDOR_OPENING_MM`, 250 mm
+by default). That 250 mm figure comes from Dash's measured body width
+(180-190 mm) plus margin for actuator and sensor slop — the minimum gap
+trusted as passable. Motion planning keeps 150 mm away from a wall for live
+steering, a separate, smaller margin than the corridor-opening check used for
+reachability classification. A wall right next to (parallel to) a connection
+but not actually narrowing the gap can still register as blocking under this
+distance-only check, since orientation relative to the path is not modeled —
+see [Corridor-Clearance Check Does Not Model Wall
+Orientation](#corridor-clearance-check-does-not-model-wall-orientation) below.
 
 The mapper reports major progress to stdout with `[cell complete]`,
 `[territory complete]`, and `[adjacent territory unlocked]` messages. Territory
@@ -670,6 +689,66 @@ Relevant code: `validate_odometry` (and the `TRACK_WIDTH_MM` /
 `ODOMETRY_SLIP_HEADING_DEG` constants) and `update_pose` in
 `examples/mapping/map_room.py`; the `get_left_wheel`, `get_right_wheel`,
 `get_yaw`, `get_pitch`, and `get_acceleration` sensors in `dash/sensors.py`.
+
+### Corridor-Clearance Check Does Not Model Wall Orientation
+
+`territory_resolution`'s reachability BFS (see [Conservative
+Exploration](#conservative-exploration)) blocks a cell-center connection when
+any point on it comes within `CORRIDOR_HALF_CLEARANCE_MM` (125 mm) of an
+inferred wall segment, regardless of that wall's orientation relative to the
+connection. A wall running *parallel* to a connection, off to the side, can
+register as "too close" even though it does not actually narrow the path
+along the direction of travel — only a wall that crosses *transversely* near
+the connection should block it. The 125 mm threshold (half of
+`MIN_CORRIDOR_OPENING_MM`, derived from Dash's measured 180-190 mm body width)
+was chosen and validated against exactly one real map
+(`data/room_map.json`) plus two prior regression scenarios; it has not yet
+been exercised against a wider variety of corridor geometries (sharp corners,
+short furniture legs at odd angles, etc.), so both false-blocks and
+false-opens beyond those three cases are unverified.
+
+A more accurate model would test whether the wall, projected onto the
+connection's direction of travel, actually overlaps the connection's extent
+within the clearance band — effectively treating the connection as a
+rectangle (`MIN_CORRIDOR_OPENING_MM` wide, leg-length long) and checking for
+intersection, rather than measuring undirected point-to-segment distance.
+
+Relevant code: `territory_resolution` and `MIN_CORRIDOR_OPENING_MM` /
+`CORRIDOR_HALF_CLEARANCE_MM` in `examples/mapping/conservative_exploration.py`;
+`segment_crosses_wall` in `examples/mapping/exploration_walls.py`; regression
+tests in `tests/test_conservative_exploration.py`.
+
+### Verifying Wall Detections Against Transient Tilt
+
+When a forward leg stops early with elevated proximity readings, the mapper
+records it as a wall (`mark_ahead`/`handle_leg_end` in
+`examples/mapping/map_room.py`). Investigating a run where several such wall
+points seemed implausible (`data/room_map.json`, no physical wall at the
+recorded location) showed:
+
+- The stop was **not** an artifact of the conservative-territory boundary
+  clamp: in every case the robot's *actual* traveled distance (from wheel
+  odometry) fell well short of even the policy-clamped *requested* distance
+  (ratios of roughly 0.3-0.8), meaning live proximity sensing — not the
+  synthetic territory edge — ended the leg early.
+- Whether a brief, sub-threshold tilt (a bump too small to cross
+  `PITCH_TILT_THRESHOLD`) caused a spurious proximity spike could not be ruled
+  in or out: pitch is sampled once, *after* each leg ends
+  (`_ExplorationRun.handle_leg_end`), not continuously during it. A momentary
+  bump that settles back to flat before the leg finishes leaves no trace in
+  the saved data.
+
+Adding per-leg min/max pitch (and ideally min/max proximity) sampled
+throughout the move, not just at the end, would make this verifiable from the
+saved JSON instead of inferred after the fact, and could let the mapper
+distinguish a genuine wall from a bump-induced false reading automatically
+(e.g. discount a wall recorded during a leg whose pitch briefly excursed past
+some lower bump-detection threshold even if it never crossed
+`PITCH_TILT_THRESHOLD`).
+
+Relevant code: `handle_leg_end`, `mark_ahead`, `report_leg`, and
+`PITCH_TILT_THRESHOLD` in `examples/mapping/map_room.py`; `get_pitch` in
+`dash/sensors.py`.
 
 ## Command Reference
 
