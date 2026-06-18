@@ -534,19 +534,41 @@ function computeBounds() {
 }
 
 function fitView() {
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  let bw = bounds.maxX - bounds.minX, bh = bounds.maxY - bounds.minY;
-  // Odd rotations swap the content's width and height on screen.
-  if (rotationSteps % 2) { const t = bw; bw = bh; bh = t; }
-  const pad = 40;
-  view.scale = Math.min((w - pad * 2) / bw, (h - pad * 2) / bh);
-  view.ox = w / 2 - ((bounds.minX + bounds.maxX) / 2) * view.scale;
-  // y flipped: screen_y = oy - world_y * scale
-  view.oy = h / 2 + ((bounds.minY + bounds.maxY) / 2) * view.scale;
+  const w = canvas.clientWidth, h = canvas.clientHeight, pad = 40;
+  const exX = bounds.maxX - bounds.minX, exY = bounds.maxY - bounds.minY;
+  // Transpose swaps which world axis spans the screen horizontal/vertical; an
+  // odd rotation swaps them again.
+  let hExt = TRANSPOSE ? exY : exX;
+  let vExt = TRANSPOSE ? exX : exY;
+  if (rotationSteps % 2) { const t = hExt; hExt = vExt; vExt = t; }
+  view.scale = Math.min((w - pad * 2) / hExt, (h - pad * 2) / vExt);
+  // Center the content midpoint at the canvas center (rotation pivots there).
+  const midX = (bounds.minX + bounds.maxX) / 2, midY = (bounds.minY + bounds.maxY) / 2;
+  const hW = TRANSPOSE ? midY : midX, vW = TRANSPOSE ? midX : midY;
+  view.ox = w / 2 - hW * view.scale;
+  view.oy = h / 2 + vW * view.scale;
 }
 
 function sx(x) { return view.ox + x * view.scale; }
 function sy(y) { return view.oy - y * view.scale; }
+
+// Axis transpose: draw world +x up the page and world +y across it, matching
+// how the room reads from the dock. Positions only -- coordinate labels keep
+// their true map indices. TX/TY take a full (x, y) pair since the transpose
+// couples the two axes.
+const TRANSPOSE = true;
+function TX(x, y) { return sx(TRANSPOSE ? y : x); }
+function TY(x, y) { return sy(TRANSPOSE ? x : y); }
+
+// Screen-space axis-aligned square covering the world square [wx,wx+side] x
+// [wy,wy+side]; returns [minX, minY, sidePx]. Works under transpose because a
+// transpose keeps axis-aligned squares axis-aligned (only the min corner moves).
+function squareRect(wx, wy, side) {
+  const corners = [[wx, wy], [wx + side, wy], [wx + side, wy + side], [wx, wy + side]];
+  let minX = Infinity, minY = Infinity;
+  for (const [a, b] of corners) { minX = Math.min(minX, TX(a, b)); minY = Math.min(minY, TY(a, b)); }
+  return [minX, minY, side * view.scale];
+}
 
 // Map a base (un-rotated) screen point through the active map rotation, which
 // pivots about the canvas center. Used to place upright labels at the rotated
@@ -645,8 +667,7 @@ function drawCells(frame) {
         const state = grid[cx + ',' + cy] || 'frontier';
         const wx = t[0] * TMM + cx * GMM;
         const wy = t[1] * TMM + cy * GMM;
-        const x = sx(wx), y = sy(wy + GMM);  // top-left in screen space
-        const s = GMM * view.scale;
+        const [x, y, s] = squareRect(wx, wy, GMM);  // axis-aligned cell square
         ctx.fillStyle = CELL_COLORS[state];
         ctx.globalAlpha = isFocus ? 0.30 : 0.18;
         ctx.fillRect(x, y, s, s);
@@ -675,7 +696,7 @@ function drawCellLabels(frame) {
       for (let cy = 0; cy < GRID; cy++) {
         const wx = t[0] * TMM + (cx + 0.5) * GMM;
         const wy = t[1] * TMM + (cy + 0.5) * GMM;
-        const [px, py] = rotateScreen(sx(wx), sy(wy));
+        const [px, py] = rotateScreen(TX(wx, wy), TY(wx, wy));
         ctx.fillText(cx + ',' + cy, px, py);
       }
     }
@@ -685,8 +706,7 @@ function drawCellLabels(frame) {
 function drawTerritoryBorders() {
   for (const t of DATA.territories) {
     const isFocus = (t[0] === DATA.focus[0] && t[1] === DATA.focus[1]);
-    const x = sx(t[0] * TMM), y = sy((t[1] + 1) * TMM);
-    const s = TMM * view.scale;
+    const [x, y, s] = squareRect(t[0] * TMM, t[1] * TMM, TMM);
     ctx.strokeStyle = isFocus ? '#7da2ff' : 'rgba(125,162,255,0.4)';
     ctx.lineWidth = isFocus ? 2.5 : 1.5;
     ctx.strokeRect(x, y, s, s);
@@ -704,7 +724,7 @@ function drawTerritoryLabels() {
       [(t[0] + 1) * TMM, t[1] * TMM],
       [(t[0] + 1) * TMM, (t[1] + 1) * TMM],
       [t[0] * TMM, (t[1] + 1) * TMM],
-    ].map(([wx, wy]) => rotateScreen(sx(wx), sy(wy)));
+    ].map(([wx, wy]) => rotateScreen(TX(wx, wy), TY(wx, wy)));
     // Top-right on screen = largest (x - y).
     let best = corners[0];
     for (const c of corners) {
@@ -724,15 +744,15 @@ function drawTerritoryLabels() {
 function drawDockWalls() {
   ctx.strokeStyle = 'rgba(230,236,255,0.55)';
   ctx.lineWidth = 3;
-  // bottom dock wall along y=0, x in [0, TMM]
+  // side dock wall along y=0, x in [0, TMM]
   ctx.beginPath();
-  ctx.moveTo(sx(0), sy(0)); ctx.lineTo(sx(TMM), sy(0));
+  ctx.moveTo(TX(0, 0), TY(0, 0)); ctx.lineTo(TX(TMM, 0), TY(TMM, 0));
   ctx.stroke();
-  // left dock wall along x=0, into the open room (toward -y here)
+  // rear dock wall along x=0, into the open room
   const startY = DATA.path.length ? DATA.path[0][1] : -1;
   const wallY = startY < 0 ? -TMM : TMM;
   ctx.beginPath();
-  ctx.moveTo(sx(0), sy(0)); ctx.lineTo(sx(0), sy(wallY));
+  ctx.moveTo(TX(0, 0), TY(0, 0)); ctx.lineTo(TX(0, wallY), TY(0, wallY));
   ctx.stroke();
 }
 
@@ -743,8 +763,8 @@ function drawWallSegments(revealIndex) {
   for (const seg of DATA.wall_segments) {
     if (seg[2] > revealIndex) continue;  // both endpoints discovered yet?
     ctx.beginPath();
-    ctx.moveTo(sx(seg[0][0]), sy(seg[0][1]));
-    ctx.lineTo(sx(seg[1][0]), sy(seg[1][1]));
+    ctx.moveTo(TX(seg[0][0], seg[0][1]), TY(seg[0][0], seg[0][1]));
+    ctx.lineTo(TX(seg[1][0], seg[1][1]), TY(seg[1][0], seg[1][1]));
     ctx.stroke();
   }
   ctx.setLineDash([]);
@@ -769,8 +789,10 @@ function drawPath(uptoIndex, currentRun) {
 
 function strokePoly(pts) {
   ctx.beginPath();
-  ctx.moveTo(sx(pts[0][0]), sy(pts[0][1]));
-  for (let k = 1; k < pts.length; k++) ctx.lineTo(sx(pts[k][0]), sy(pts[k][1]));
+  ctx.moveTo(TX(pts[0][0], pts[0][1]), TY(pts[0][0], pts[0][1]));
+  for (let k = 1; k < pts.length; k++) {
+    ctx.lineTo(TX(pts[k][0], pts[k][1]), TY(pts[k][0], pts[k][1]));
+  }
   ctx.stroke();
 }
 
@@ -793,7 +815,7 @@ function drawWalls(revealIndex) {
   ctx.lineWidth = 2;
   for (const p of DATA.walls) {
     if (p[2] > revealIndex) continue;
-    const x = sx(p[0]), y = sy(p[1]), r = 5;
+    const x = TX(p[0], p[1]), y = TY(p[0], p[1]), r = 5;
     ctx.strokeStyle = '#ff5d5d';
     ctx.beginPath();
     ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r);
@@ -803,7 +825,7 @@ function drawWalls(revealIndex) {
   }
   for (const p of DATA.obstacles) {
     if (p[2] > revealIndex) continue;
-    const x = sx(p[0]), y = sy(p[1]), r = 6;
+    const x = TX(p[0], p[1]), y = TY(p[0], p[1]), r = 6;
     ctx.fillStyle = '#ffa64d';
     ctx.beginPath();
     ctx.moveTo(x, y - r); ctx.lineTo(x + r, y + r); ctx.lineTo(x - r, y + r);
@@ -813,7 +835,7 @@ function drawWalls(revealIndex) {
 }
 
 function drawCorner() {
-  const x = sx(0), y = sy(0), r = 9;
+  const x = TX(0, 0), y = TY(0, 0), r = 9;
   ctx.strokeStyle = '#e6ecff';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
@@ -869,10 +891,13 @@ dashImg.onload = () => { dashReady = true; };
 dashImg.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(DASH_SVG);
 
 function drawRobot(pose) {
-  const x = sx(pose.x), y = sy(pose.y);
+  const x = TX(pose.x, pose.y), y = TY(pose.x, pose.y);
   const rad = pose.heading * Math.PI / 180;
-  // heading: 0deg along +x, +y is up (we flipped y), so screen angle = -rad
-  const a = -rad;
+  // Derive the avatar's on-screen facing from the projected heading vector, so
+  // the transpose (and any rotation) carries the orientation automatically.
+  const ax = TX(pose.x + Math.cos(rad), pose.y + Math.sin(rad));
+  const ay = TY(pose.x + Math.cos(rad), pose.y + Math.sin(rad));
+  const screenAng = Math.atan2(ay - y, ax - x);
   // footprint sized to Dash's body (~200 mm across the triangle)
   const half = Math.max(11, 115 * view.scale);
   // soft glow under the robot
@@ -884,8 +909,8 @@ function drawRobot(pose) {
 
   ctx.save();
   ctx.translate(x, y);
-  // rotate so the SVG's "up" (forward) aligns with the heading direction
-  ctx.rotate(a + Math.PI / 2);
+  // rotate so the SVG's "up" (forward) aligns with the on-screen heading
+  ctx.rotate(screenAng + Math.PI / 2);
   if (dashReady) {
     ctx.drawImage(dashImg, -half, -half, half * 2, half * 2);
   } else {

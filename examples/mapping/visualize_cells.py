@@ -98,19 +98,21 @@ def render_cell_map(data, output, home_route=False):
         if not rpath:
             continue
         color = COLORS[index % len(COLORS)]
+        # Axes are transposed: world x is drawn vertical, world y horizontal,
+        # to match how the room reads from the dock.
         px = [point[0] for point in rpath]
         py = [point[1] for point in rpath]
-        ax.plot(px, py, '-', color=color, alpha=0.4, linewidth=1,
+        ax.plot(py, px, '-', color=color, alpha=0.4, linewidth=1,
                 label=f'Run {index + 1} ({run["timestamp"][:10]})')
-        ax.plot(px[0], py[0], 'o', color=color, markersize=8, zorder=6)
-        ax.plot(px[-1], py[-1], 's', color=color, markersize=7, zorder=6)
+        ax.plot(py[0], px[0], 'o', color=color, markersize=8, zorder=6)
+        ax.plot(py[-1], px[-1], 's', color=color, markersize=7, zorder=6)
         step = max(1, len(rpath) // 15)
         for point_index in range(0, len(rpath) - step, step):
             start = rpath[point_index]
             end = rpath[point_index + step]
             if math.hypot(end[0] - start[0], end[1] - start[1]) > 1:
                 ax.annotate(
-                    '', xy=end[:2], xytext=start[:2],
+                    '', xy=(end[1], end[0]), xytext=(start[1], start[0]),
                     arrowprops=dict(arrowstyle='->', color=color, lw=1),
                 )
 
@@ -126,7 +128,7 @@ def render_cell_map(data, output, home_route=False):
                     if cell in resolution[name]
                 )
                 rectangle = patches.Rectangle(
-                    (x0 + cell_x * grid_mm, y0 + cell_y * grid_mm),
+                    (y0 + cell_y * grid_mm, x0 + cell_x * grid_mm),
                     grid_mm,
                     grid_mm,
                     facecolor=CELL_COLORS[status],
@@ -137,8 +139,8 @@ def render_cell_map(data, output, home_route=False):
                 )
                 ax.add_patch(rectangle)
                 ax.text(
-                    x0 + (cell_x + 0.5) * grid_mm,
                     y0 + (cell_y + 0.5) * grid_mm,
+                    x0 + (cell_x + 0.5) * grid_mm,
                     f'{territory} cell {cell_x},{cell_y}\nvisited: '
                     f'{"yes" if cell in resolution["visited"] else "no"}\n{status}',
                     ha='center',
@@ -151,16 +153,18 @@ def render_cell_map(data, output, home_route=False):
     if wall_segments:
         for index, (start, end) in enumerate(wall_segments):
             ax.plot(
-                [start[0], end[0]], [start[1], end[1]],
+                [start[1], end[1]], [start[0], end[0]],
                 color='#d62728', linestyle='--', linewidth=0.8, alpha=0.25,
                 label='Inferred continuous walls' if index == 0 else None,
                 zorder=3,
             )
     if walls:
-        ax.scatter(*zip(*walls), c='red', s=80, marker='x', linewidths=2,
+        wx, wy = zip(*walls)
+        ax.scatter(wy, wx, c='red', s=80, marker='x', linewidths=2,
                    label=f'Wall ({len(walls)} pts)', zorder=7)
     if obstacles:
-        ax.scatter(*zip(*obstacles), c='orange', s=80, marker='^',
+        ox_, oy_ = zip(*obstacles)
+        ax.scatter(oy_, ox_, c='orange', s=80, marker='^',
                    label=f'Obstacle ({len(obstacles)} pts)', zorder=7)
 
     if home_route:
@@ -168,8 +172,8 @@ def render_cell_map(data, output, home_route=False):
         route_x = [point[0] for point in home_route]
         route_y = [point[1] for point in home_route]
         ax.plot(
-            route_x,
             route_y,
+            route_x,
             color='#0057ff',
             linewidth=4,
             marker='o',
@@ -180,7 +184,7 @@ def render_cell_map(data, output, home_route=False):
         for index, point in enumerate(home_route):
             ax.annotate(
                 str(index),
-                xy=point,
+                xy=(point[1], point[0]),
                 xytext=(7, 7),
                 textcoords='offset points',
                 color='#003399',
@@ -191,9 +195,10 @@ def render_cell_map(data, output, home_route=False):
 
     start_y = float(runs[0]['path'][0][1]) if runs and runs[0].get('path') else -1
     wall_y = -territory_mm if start_y < 0 else territory_mm
-    ax.plot([0, territory_mm], [0, 0], 'k-', linewidth=2, alpha=0.5,
+    # Transposed axes: pass (horizontal=world y, vertical=world x).
+    ax.plot([0, 0], [0, territory_mm], 'k-', linewidth=2, alpha=0.5,
             label='Dock walls')
-    ax.plot([0, 0], [0, wall_y], 'k-', linewidth=2, alpha=0.5)
+    ax.plot([0, wall_y], [0, 0], 'k-', linewidth=2, alpha=0.5)
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.2)
     ax.legend(fontsize=8, loc='upper left', bbox_to_anchor=(1.01, 1))
@@ -203,14 +208,15 @@ def render_cell_map(data, output, home_route=False):
         f'{" - Planned Go-Home Route" if home_route else ""}',
         fontsize=14,
     )
-    ax.set_xlabel('x (mm)')
-    ax.set_ylabel('y (mm)')
+    ax.set_xlabel('y (mm)')
+    ax.set_ylabel('x (mm)')
     min_x = min(territory[0] * territory_mm for territory in territories)
     max_x = max((territory[0] + 1) * territory_mm for territory in territories)
     min_y = min(territory[1] * territory_mm for territory in territories)
     max_y = max((territory[1] + 1) * territory_mm for territory in territories)
-    ax.set_xlim(min(-200, min_x - 200), max(territory_mm + 200, max_x + 200))
-    ax.set_ylim(min(-200, min_y - 200), max(territory_mm + 200, max_y + 200))
+    # Horizontal axis is world y, vertical axis is world x.
+    ax.set_xlim(min(-200, min_y - 200), max(territory_mm + 200, max_y + 200))
+    ax.set_ylim(min(-200, min_x - 200), max(territory_mm + 200, max_x + 200))
     plt.tight_layout()
 
     plt.savefig(output, dpi=180, bbox_inches='tight')
