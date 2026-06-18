@@ -307,6 +307,51 @@ Wheel odometry measures wheel rotation, not physical movement. If Dash is
 blocked while its wheels spin, the saved pose can become inaccurate. Stop the
 run and avoid go-home if this happens.
 
+## Visualizing A Map
+
+Two tools render a saved map. Both read the JSON the mapper writes and need no
+hardware or running server.
+
+[`visualize_cells.py`](visualize_cells.py) renders a static PNG — a cell-grid
+overlay with each cell's visited / blocked / unreachable / frontier state, the
+robot path, and wall observations:
+
+```bash
+uv run --extra tools examples/mapping/visualize_cells.py data/room_map.json
+```
+
+It writes `<map>_cells.png` beside the map. Pass `--output FILE` to choose the
+path, or `--home-route` to overlay the route the current go-home planner would
+follow.
+
+[`animation.py`](animation.py) renders an interactive replay as a single,
+self-contained HTML file — all map data and rendering code are embedded, so it
+has no external dependencies and can be opened locally or published to the web
+as-is:
+
+```bash
+uv run --extra tools examples/mapping/animation.py data/room_map.json
+```
+
+It writes `<map>_animation.html` beside the map (override with `--output`,
+retitle with `--title`, or override the recorded territory size with
+`--territory-size`). The animation:
+
+- Replays the robot leg by leg as a top-view Dash avatar (the three-sphere
+  body, head dome, and orange eye), with a glowing path trail.
+- Draws the conservative-exploration territories and their 4×4 cell grids,
+  labeling each cell's coordinate and coloring it by live state as the run
+  progresses.
+- Reveals wall and obstacle observations only as the robot senses them — each
+  flashes a discovery pulse — and resolves cells using just the blockers found
+  so far, so the map fills in over time rather than appearing all at once.
+- Paces 1× playback to Dash's real motion timing (200 mm/s obstacle-aware
+  moves, 85.9 deg/s turns; see `dash/motion.py`), so a long forward leg takes
+  proportionally longer than a turn. The header shows the total wall-clock
+  motion time, and a speed selector offers 0.5×–4×.
+- Supports play/pause, scrubbing, drag-to-pan, scroll-to-zoom, and
+  double-click to reset the view.
+
 ## Blocked Go-Home Routes
 
 Go-home remembers which route segments caused an early stop. Each safely aborted
@@ -842,4 +887,11 @@ Show all calibration options:
 
 ```bash
 uv run examples/mapping/calibrate.py --help
+```
+
+Render a saved map (see [Visualizing A Map](#visualizing-a-map)):
+
+```bash
+uv run --extra tools examples/mapping/visualize_cells.py data/room_map.json
+uv run --extra tools examples/mapping/animation.py data/room_map.json
 ```
