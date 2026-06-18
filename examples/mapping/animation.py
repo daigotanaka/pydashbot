@@ -477,6 +477,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <footer>
     <button class="ctrl" id="play" title="Play / pause">&#9658;</button>
     <button class="ghost" id="restart" title="Restart">&#8635;</button>
+    <button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>
     <div class="scrub">
       <input type="range" id="seek" min="0" max="0" value="0" step="1">
       <div class="ticks">
@@ -515,6 +516,7 @@ const ctx = canvas.getContext('2d');
 // natural "into the room is up" view.
 let view = { scale: 1, ox: 0, oy: 0 };  // ox/oy in screen px
 let bounds = computeBounds();
+let rotationSteps = 0;  // 90-degree clockwise steps applied to the map view
 
 function computeBounds() {
   let minX = -250, maxX = TMM + 250, minY = -250, maxY = TMM + 250;
@@ -533,7 +535,9 @@ function computeBounds() {
 
 function fitView() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  const bw = bounds.maxX - bounds.minX, bh = bounds.maxY - bounds.minY;
+  let bw = bounds.maxX - bounds.minX, bh = bounds.maxY - bounds.minY;
+  // Odd rotations swap the content's width and height on screen.
+  if (rotationSteps % 2) { const t = bw; bw = bh; bh = t; }
   const pad = 40;
   view.scale = Math.min((w - pad * 2) / bw, (h - pad * 2) / bh);
   view.ox = w / 2 - ((bounds.minX + bounds.maxX) / 2) * view.scale;
@@ -543,6 +547,19 @@ function fitView() {
 
 function sx(x) { return view.ox + x * view.scale; }
 function sy(y) { return view.oy - y * view.scale; }
+
+// Map a base (un-rotated) screen point through the active map rotation, which
+// pivots about the canvas center. Used to place upright labels at the rotated
+// positions without rotating the glyphs themselves.
+function rotateScreen(px, py) {
+  const k = ((rotationSteps % 4) + 4) % 4;
+  if (!k) return [px, py];
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const a = k * Math.PI / 2;
+  const c = Math.cos(a), s = Math.sin(a);
+  const dx = px - w / 2, dy = py - h / 2;
+  return [w / 2 + dx * c - dy * s, h / 2 + dx * s + dy * c];
+}
 
 function resize() {
   const dpr = window.devicePixelRatio || 1;
@@ -592,6 +609,15 @@ function draw() {
   const pose = interpolatedPose();
   const frame = pose.frame;
 
+  // Rotate the whole map (geometry + robot) about the canvas center; labels are
+  // drawn upright afterwards so the text never tilts.
+  const k = ((rotationSteps % 4) + 4) % 4;
+  ctx.save();
+  if (k) {
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(k * Math.PI / 2);
+    ctx.translate(-w / 2, -h / 2);
+  }
   drawCells(frame);
   drawTerritoryBorders();
   drawDockWalls();
@@ -600,6 +626,10 @@ function draw() {
   drawWalls(pose.index);
   drawCorner();
   drawRobot(pose);
+  ctx.restore();
+
+  drawCellLabels(frame);
+  drawTerritoryLabels();
 }
 
 function drawCells(frame) {
@@ -624,13 +654,29 @@ function drawCells(frame) {
         ctx.strokeStyle = 'rgba(180,200,255,0.12)';
         ctx.lineWidth = 1;
         ctx.strokeRect(x, y, s, s);
-        if (labelPx >= 7) {
-          ctx.fillStyle = 'rgba(233,239,255,0.72)';
-          ctx.font = labelPx.toFixed(0) + 'px ui-monospace, monospace';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(cx + ',' + cy, x + s / 2, y + s / 2);
-        }
+      }
+    }
+  }
+}
+
+// Cell coordinate labels, drawn upright after the rotated geometry pass so they
+// stay readable at any rotation. Placed at each cell's (rotated) center.
+function drawCellLabels(frame) {
+  const labelPx = Math.min(13, Math.max(6, GMM * view.scale * 0.16));
+  if (labelPx < 7) return;
+  ctx.fillStyle = 'rgba(233,239,255,0.72)';
+  ctx.font = labelPx.toFixed(0) + 'px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const t of DATA.territories) {
+    const key = t[0] + ',' + t[1];
+    if (!frame.cells[key]) continue;
+    for (let cx = 0; cx < GRID; cx++) {
+      for (let cy = 0; cy < GRID; cy++) {
+        const wx = t[0] * TMM + (cx + 0.5) * GMM;
+        const wy = t[1] * TMM + (cy + 0.5) * GMM;
+        const [px, py] = rotateScreen(sx(wx), sy(wy));
+        ctx.fillText(cx + ',' + cy, px, py);
       }
     }
   }
@@ -644,14 +690,34 @@ function drawTerritoryBorders() {
     ctx.strokeStyle = isFocus ? '#7da2ff' : 'rgba(125,162,255,0.4)';
     ctx.lineWidth = isFocus ? 2.5 : 1.5;
     ctx.strokeRect(x, y, s, s);
-    // territory coordinate label, top-left, in world terms
-    ctx.fillStyle = isFocus ? '#a9c2ff' : 'rgba(139,150,184,0.85)';
+  }
+}
+
+// Territory labels, drawn upright after the rotated geometry pass and anchored
+// to the top-right corner of each territory's on-screen box (so the label sits
+// top-right at any rotation).
+function drawTerritoryLabels() {
+  for (const t of DATA.territories) {
+    const isFocus = (t[0] === DATA.focus[0] && t[1] === DATA.focus[1]);
+    const corners = [
+      [t[0] * TMM, t[1] * TMM],
+      [(t[0] + 1) * TMM, t[1] * TMM],
+      [(t[0] + 1) * TMM, (t[1] + 1) * TMM],
+      [t[0] * TMM, (t[1] + 1) * TMM],
+    ].map(([wx, wy]) => rotateScreen(sx(wx), sy(wy)));
+    // Top-right on screen = largest (x - y).
+    let best = corners[0];
+    for (const c of corners) {
+      if (c[0] - c[1] > best[0] - best[1]) best = c;
+    }
+    const s = TMM * view.scale;
     const fs = Math.min(15, Math.max(9, s * 0.07));
+    ctx.fillStyle = isFocus ? '#a9c2ff' : 'rgba(139,150,184,0.85)';
     ctx.font = '650 ' + fs.toFixed(0) + 'px ui-monospace, monospace';
-    ctx.textAlign = 'left';
+    ctx.textAlign = 'right';
     ctx.textBaseline = 'top';
     ctx.fillText('T ' + t[0] + ',' + t[1] + (isFocus ? '  (focus)' : ''),
-                 x + 6, y + 5);
+                 best[0] - 6, best[1] + 5);
   }
 }
 
@@ -907,6 +973,11 @@ playBtn.addEventListener('click', () => {
 });
 document.getElementById('restart').addEventListener('click', () => {
   pos = 0; seek.value = 0;
+});
+document.getElementById('rotate').addEventListener('click', () => {
+  rotationSteps = (rotationSteps + 1) % 4;
+  resize();
+  fitView();  // refit for the swapped aspect; recenters the view
 });
 seek.addEventListener('input', () => {
   pos = parseFloat(seek.value);
