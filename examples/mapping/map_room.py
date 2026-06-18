@@ -711,10 +711,12 @@ def dock_to_corner(deg_per_yaw, mm_per_wd, wait_sec=15):
     # contact in steps 1 and 3 (rear, then left). This gives a consistent
     # corner reference regardless of where within the acceptable placement zone
     # the user set the robot down initially.
-    # The robot's rotation axis sits ~310mm east (+x) and ~310mm south (-y) of
-    # the corner (where the rear wall and left wall meet), measured physically.
+    # The robot's rotation axis sits ~310mm from each wall, measured physically.
+    # The map frame places the start in the positive quadrant so the starting
+    # territory is (0,0) and the room grows toward +x/+y; see update_pose, which
+    # mirrors the gyro's handedness into this frame.
     x0 = 310.0
-    y0 = -310.0
+    y0 = 310.0
     print(f"  Docked. Starting position: ({x0:.0f}, {y0:.0f}) mm from corner, heading 0°")
     send_command('neck_color', '#00ffff')
     return x0, y0
@@ -848,7 +850,10 @@ def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
             issues.extend(event_issues)
             odometry_rejected = True
         else:
-            heading = normalize_heading(heading + heading_delta)
+            # Map frame mirrors the gyro handedness (see the class update_pose):
+            # accumulate the negated heading delta while turn commands are
+            # negated to physical at the send_command('turn', ...) sites.
+            heading = normalize_heading(heading - heading_delta)
             hr = math.radians(heading)
             x += distance_mm * math.cos(hr)
             y += distance_mm * math.sin(hr)
@@ -862,9 +867,12 @@ def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
         if abs(turn) < MIN_TRACKED_TURN_DEG:
             return True
         for step in tracked_turn_steps(turn):
-            outcome = send_command('turn', step).get('result')
+            # Negate the map-frame angle to a physical turn command (see
+            # update_pose); update_pose records the physical step for odometry.
+            physical_step = -step
+            outcome = send_command('turn', physical_step).get('result')
             previous_heading = heading
-            if update_pose('turn', step) is None:
+            if update_pose('turn', physical_step) is None:
                 return False
             if abs(angle_delta(heading, previous_heading)) < abs(step) * 0.5:
                 issues.append('go-home turn did not execute')
@@ -1210,6 +1218,23 @@ class _ExplorationRun:
         self.known_wall_segments = inferred_wall_segments(
             self.known_walls, max_distance=self.cell_mm
         )
+        # The robot docks in a room corner at world (0,0): a wall behind it
+        # (along the x=0 axis) and a wall to its side (along the y=0 axis). Those
+        # walls are implied by the docking sequence and never observed, so the
+        # policy would otherwise propose expanding into the unreachable space
+        # behind them (e.g. territory (0,-1)/(-1,0)). Record them as known
+        # segments extending from the corner into the explorable quadrant (the
+        # sign of the start pose), so expansion-crossing checks and the
+        # reachability BFS reject crossings of either axis. They lie on the
+        # start territory's edges, clear of its cell centers, so no within-
+        # territory connection is falsely blocked.
+        dock_wall_length = 20 * territory_mm
+        sign_x = math.copysign(1.0, self.x) if self.x else 1.0
+        sign_y = math.copysign(1.0, self.y) if self.y else 1.0
+        self.known_wall_segments = self.known_wall_segments + [
+            ((0.0, 0.0), (0.0, sign_y * dock_wall_length)),  # rear wall (x=0)
+            ((0.0, 0.0), (sign_x * dock_wall_length, 0.0)),  # side wall (y=0)
+        ]
         # There is always a policy, selected by name. Bounded-territory policies
         # (subclasses of ConservativeExploration) take the territory state;
         # the unconstrained novelty default takes only the live path.
@@ -1273,7 +1298,14 @@ class _ExplorationRun:
             event['issues'] = ['pose tracking was already lost']
         else:
             previous_position = (self.x, self.y)
-            self.heading = normalize_heading(self.heading + heading_delta)
+            # Map frame mirrors the gyro's handedness so the room grows toward
+            # +y (start territory (0,0)). The gyro/odometry stay in the physical
+            # frame -- validate_odometry above and the recorded event keep the
+            # physical heading_delta -- but the stored pose accumulates its
+            # negation. Map-frame turn angles are negated back to physical at the
+            # send_command('turn', ...) sites, keeping the control loop
+            # consistent (command -theta -> measure -theta -> heading += theta).
+            self.heading = normalize_heading(self.heading - heading_delta)
             hr = math.radians(self.heading)
             self.x += d_mm * math.cos(hr)
             self.y += d_mm * math.sin(hr)
@@ -1309,8 +1341,11 @@ class _ExplorationRun:
         for step in tracked_turn_steps(turn_angle):
             if not step:
                 continue
-            send_command('turn', step)
-            if self.update_pose('turn', step) is None:
+            # Negate the map-frame angle to a physical turn command (see
+            # update_pose); update_pose records the physical step for odometry.
+            physical_step = -step
+            send_command('turn', physical_step)
+            if self.update_pose('turn', physical_step) is None:
                 break
 
     def redirect(self, reason, sounds=None, back_away=False, left=0, right=0):
@@ -1502,8 +1537,11 @@ class _ExplorationRun:
             )
             if name == 'turn':
                 for step in tracked_turn_steps(value):
-                    send_command('turn', step)
-                    if self.update_pose('turn', step) is None:
+                    # Preset angles are map-frame; negate to a physical turn
+                    # command (see update_pose).
+                    physical_step = -step
+                    send_command('turn', physical_step)
+                    if self.update_pose('turn', physical_step) is None:
                         break
                 if self.quality['tracking_lost']:
                     break

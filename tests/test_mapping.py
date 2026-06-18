@@ -254,12 +254,16 @@ class MappingStrategyTests(unittest.TestCase):
             patch.object(
                 map_room,
                 "read_settled",
+                # Map frame mirrors the gyro handedness: the map-frame course
+                # turns (-90 each) are commanded as +90, so the simulated gyro
+                # reads positive yaw. The reconstructed map-frame path is
+                # unchanged (the negation round-trips).
                 side_effect=[
                     0, 250, 250,
-                    -90, 300, 200,
-                    -90, 550, 450,
-                    -180, 600, 400,
-                    -180, 850, 650,
+                    90, 300, 200,
+                    90, 550, 450,
+                    180, 600, 400,
+                    180, 850, 650,
                 ],
             ),
         ):
@@ -519,11 +523,14 @@ class MappingStrategyTests(unittest.TestCase):
             patch.object(
                 map_room,
                 "read_settled",
+                # Map frame mirrors the gyro handedness, so the simulated gyro
+                # yaw is negated relative to the map-frame turns; the map-frame
+                # return path is unchanged (the negation round-trips).
                 side_effect=[
-                    90, -100, 100,
-                    90, 900, 1100,
+                    -90, -100, 100,
+                    -90, 900, 1100,
                     0, 1100, 900,
-                    -90, 1300, 700,
+                    90, 1300, 700,
                 ],
             ),
         ):
@@ -1016,10 +1023,13 @@ class MappingStrategyTests(unittest.TestCase):
             patch.object(
                 map_room,
                 "read_settled",
+                # Map frame mirrors the gyro handedness, so a map-frame turn is
+                # commanded as its negation and the simulated gyro reads the
+                # opposite-signed yaw (here the turn leg's -100).
                 side_effect=[
                     0, 100, 100,
                     0, 50, 50,
-                    100, 0, 100,
+                    -100, 0, 100,
                 ],
             ),
         ):
@@ -1035,6 +1045,56 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(len(run["path"]), 4)
         self.assertEqual(len(run["walls"]), 1)
         self.assertEqual(run["obstacles"], [])
+
+    def test_fresh_positive_start_explores_toward_positive_y(self):
+        # Part B: from a freshly docked positive-quadrant start (territory
+        # (0,0)), a map-frame left turn (+90) is commanded to hardware as -90;
+        # the gyro reads -90 and the mirrored pose turns to map heading +90, so
+        # the forward leg grows the path toward +y (into the room).
+        readings = {
+            "get_yaw": iter([0]),
+            "get_left_wheel": iter([0]),
+            "get_right_wheel": iter([0]),
+            "get_pitch": iter([0] * 8),
+            "get_prox_left": iter([0] * 4),
+            "get_prox_right": iter([0] * 4),
+        }
+
+        def send_command(method, *args, **kwargs):
+            if method in readings:
+                return {"result": next(readings[method])}
+            return {"result": None}
+
+        times = iter([0.0, 0.0, 0.0, 0.5, 1.1, 1.1])
+        angles = iter([90])
+        with (
+            patch.object(map_room, "send_command", side_effect=send_command),
+            patch.object(map_room.time, "time", side_effect=lambda: next(times)),
+            patch.object(
+                map_room,
+                "choose_exploration_angle",
+                side_effect=lambda *a, **k: next(angles, 0),
+            ),
+            patch.object(map_room.random, "choice", return_value="okay"),
+            patch.object(
+                map_room,
+                "read_settled",
+                side_effect=[
+                    -90, 50, -50,    # turn: map +90 commanded as -90, gyro -90
+                    -90, 150, 50,    # forward +100 each wheel at heading +90 -> +y
+                ],
+            ),
+        ):
+            run = map_room.explore(1.0, 1.0, 310.0, 310.0, duration=1)
+
+        self.assertEqual(run["status"], "accepted")
+        # Started in territory (0,0) and grew toward +y, never behind y=0.
+        self.assertEqual(
+            conservative.territory_cell(310.0, 310.0, 1000), (0, 0)
+        )
+        ys = [point[1] for point in run["path"]]
+        self.assertGreater(max(ys), 310.0)
+        self.assertTrue(all(y >= 0 for y in ys))
 
     def test_rejected_odometry_stops_run_without_mapping_bad_pose(self):
         readings = {

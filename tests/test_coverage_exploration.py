@@ -11,6 +11,15 @@ FULLY_EXPLORED_SOUTH = [
     for y in (-875, -625, -375, -125)
 ]
 
+# Start territory (0,0) fully covered, in the map frame where the room grows
+# toward +x/+y. The two dock walls lie along the axes through the corner.
+FULLY_EXPLORED_START = [
+    (x, y)
+    for x in (125, 375, 625, 875)
+    for y in (125, 375, 625, 875)
+]
+DOCK_WALLS = [((0.0, 0.0), (0.0, 20000.0)), ((0.0, 0.0), (20000.0, 0.0))]
+
 
 class CoverageExplorationTests(unittest.TestCase):
     def test_is_an_exploration_policy(self):
@@ -208,6 +217,38 @@ class CoverageExplorationTests(unittest.TestCase):
         self.assertLess(
             policy.forward_distance(500, 250, -90, 2000),
             500,
+        )
+
+    def test_does_not_expand_behind_dock_walls(self):
+        # Start territory (0,0) is fully explored and the dock walls lie along
+        # the x=0 and y=0 axes. Expansions across them (into (-1,0)/(0,-1)) are
+        # unreachable space behind the walls and must be rejected; only the
+        # in-room neighbors (1,0)/(0,1) remain.
+        policy = CoverageExploration(
+            [], (310, 310), FULLY_EXPLORED_START, [], DOCK_WALLS, territory_mm=1000
+        )
+        self.assertEqual(policy.focus, (0, 0))
+        self.assertTrue(policy.territory_explored((0, 0)))
+        self.assertEqual(
+            policy.get_territory_expansions(),
+            {((0, 0), (1, 0)), ((0, 0), (0, 1))},
+        )
+
+    def test_without_dock_walls_all_neighbors_would_expand(self):
+        # Contrast: without the dock-wall segments the same fully-explored
+        # territory offers all four neighbors -- the behind-wall (-1,0)/(0,-1)
+        # included. This is exactly the spurious expansion the dock walls fix.
+        policy = CoverageExploration(
+            [], (310, 310), FULLY_EXPLORED_START, [], territory_mm=1000
+        )
+        self.assertEqual(
+            policy.get_territory_expansions(),
+            {
+                ((0, 0), (1, 0)),
+                ((0, 0), (-1, 0)),
+                ((0, 0), (0, 1)),
+                ((0, 0), (0, -1)),
+            },
         )
 
     def test_does_not_unlock_new_territories_abstractly(self):

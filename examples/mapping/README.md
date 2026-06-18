@@ -60,14 +60,15 @@ does not keep it running. Remove `policy` to use the normal map-guided
 exploration strategy.
 
 A preset course like this one runs a cell-conversion check from the dock pose
-(currently `(310,-310)`):
+(currently `(310,310)`):
 
 ```text
-move 250, turn -90, move 250, turn -90, move 250
+move 250, turn 90, move 250, turn 90, move 250
 ```
 
-With ideal motion and the current dock pose, it visits `(0,-1)` cells `(1,2)`,
-`(2,2)`, `(2,1)`, and ends in `(1,1)`. Recompute this if `x0`/`y0` in
+With ideal motion and the current dock pose, it visits `(0,0)` cells `(1,1)`,
+`(2,1)`, `(2,2)`, and ends in `(1,2)`. Course angles are in the map frame
+(positive turns head into the room toward +y). Recompute this if `x0`/`y0` in
 `dock_to_corner` (`examples/mapping/map_room.py`) or `territory_size_mm`
 changes.
 
@@ -144,16 +145,23 @@ orientation:
 Unlike the wall-search distance, the result is *not* a clearance offset from
 each wall: Dash ends up snug against both, body against the corner. The
 starting pose is fixed at Dash's measured rotation-axis offset from that
-corner — `(310, -310)` for the current physical robot (180-190 mm wide; see
+corner — `(310, 310)` for the current physical robot (180-190 mm wide; see
 `DOCK_CLEARANCE_MM`/`x0`/`y0` in `dock_to_corner`, `examples/mapping/map_room.py`).
 Re-measure and update those constants if the robot's body or sensor mounting
 changes.
 
-The resulting coordinate frame uses heading `0°` along `+x` into the room.
-Because the adjacent wall is on Dash's left, that wall is at `y=0` and open
-room lies toward negative `y`. Fresh maps therefore start at approximately
-`(310,-310)` in territory `(0,-1)`. Existing maps retain their saved start
-pose and coordinate frame.
+The resulting map coordinate frame uses heading `0°` along `+x` into the room
+and places the start in the positive quadrant, so the open room — and the
+territories Dash unlocks — grow toward `+x` and `+y`. The two dock walls lie
+along the axes through the corner: the side wall at `y=0` (for `x ≥ 0`) and the
+rear wall at `x=0` (for `y ≥ 0`); the space behind them (negative `x` or `y`)
+is never explorable, and the mapper records those walls so it does not try to
+expand past them. Fresh maps therefore start at approximately `(310, 310)` in
+territory `(0,0)`. This frame mirrors the gyro's handedness (see `update_pose`
+in `examples/mapping/map_room.py`), so the physical motion is unchanged while
+map-frame turn angles are negated to physical turn commands. Existing maps
+retain their saved start pose and (older) coordinate frame — do not append
+new-frame runs to a map created before this change; start a fresh map instead.
 
 It then explores until the requested duration ends:
 
