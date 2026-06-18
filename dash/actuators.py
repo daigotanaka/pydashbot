@@ -159,6 +159,12 @@ class CommonActuators:
     async def right_ear_color(self, color):
         await self.command("right_ear_color", color_byte_array(color))
 
+    async def head_color(self, color):
+        await self.command("head_color", color_byte_array(color))
+
+    async def beep(self):
+        await self.command("beep", bytearray(NOISES["beep"]))
+
     async def stop(self):
         await self.command("drive", bytearray([0, 0, 0]))
 
