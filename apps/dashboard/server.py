@@ -663,20 +663,25 @@ def dashboard_page(dashboard):
         'button.ghost:hover {',
         'button.ghost:hover, a.ghost:hover {',
     ).replace(
-        '<button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>',
-        '<button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>\n'
-        '    <a class="ghost" id="saveAnimation" href="/animation.html" '
-        'title="Save standalone animation">Save animation</a>\n'
-        '    <a class="ghost" id="saveMap" href="/map.json" '
-        'title="Download the map as JSON">Save map</a>\n'
-        '    <button class="ghost" id="importMap" '
-        'title="Load a map JSON into the dashboard">Import map</button>\n'
-        '    <input type="file" id="importMapFile" accept="application/json,.json" '
-        'style="display:none">',
+        '  .hint {',
+        '  a.ghost { display: inline-flex; align-items: center;\n'
+        '            justify-content: center; text-decoration: none; }\n'
+        '  .io-buttons { display: flex; flex-direction: column; gap: 8px; }\n'
+        '  .io-buttons .ghost { width: 100%; }\n'
+        '  .hint {',
     ).replace(
-        '  .speed {',
-        '  a.ghost { display: inline-flex; align-items: center; text-decoration: none; }\n'
-        '  .speed {',
+        '    </aside>',
+        '      <div class="section io-buttons">\n'
+        '        <button class="ghost" id="importMap" '
+        'title="Load a map JSON into the dashboard">Import map</button>\n'
+        '        <a class="ghost" id="saveMap" href="/map.json" '
+        'title="Download the map as JSON">Save map</a>\n'
+        '        <a class="ghost" id="saveAnimation" href="/animation.html" '
+        'title="Save standalone animation">Save animation</a>\n'
+        '        <input type="file" id="importMapFile" '
+        'accept="application/json,.json" style="display:none">\n'
+        '      </div>\n'
+        '    </aside>',
     )
     return html.replace('</body>', LIVE_DASHBOARD_SCRIPT + '\n</body>')
 
@@ -720,7 +725,9 @@ def make_handler(dashboard):
                 self.end_headers()
                 self.wfile.write(body)
             elif parsed.path == '/map.json':
-                body = json.dumps(dashboard.map_for_export()).encode('utf-8')
+                body = json.dumps(
+                    dashboard.map_for_export(), indent=2
+                ).encode('utf-8')
                 self.send_response(HTTPStatus.OK)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Disposition', 'attachment; filename="dash_map.json"')
@@ -946,7 +953,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   button.ghost:hover { border-color: var(--accent); }
   .scrub { flex: 1; display: flex; flex-direction: column; gap: 5px; }
-  .scrub input[type=range] { width: 100%; accent-color: var(--accent); }
+  .scrub-row { display: flex; align-items: center; gap: 8px; }
+  .scrub-row input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+  button.jump { width: 30px; padding: 0; display: grid; place-items: center;
+                font-size: 10px; flex-shrink: 0; }
   .scrub .ticks {
     display: flex; justify-content: space-between; font-size: 11px;
     color: var(--muted);
@@ -1001,10 +1011,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <footer>
     <button class="ctrl" id="play" title="Play / pause">&#9658;</button>
-    <button class="ghost" id="restart" title="Restart">&#8635;</button>
-    <button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>
     <div class="scrub">
-      <input type="range" id="seek" min="0" max="0" value="0" step="1">
+      <div class="scrub-row">
+        <button class="ghost jump" id="toStart" title="Jump to beginning">&#9664;</button>
+        <input type="range" id="seek" min="0" max="0" value="0" step="1">
+        <button class="ghost jump" id="toEnd" title="Jump to end">&#9654;</button>
+      </div>
       <div class="ticks">
         <span id="frameLabel">frame 0</span>
         <span id="poseLabel"></span>
@@ -1018,6 +1030,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <option value="2">2&times;</option>
         <option value="4">4&times;</option>
       </select>
+      <button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227; rotate</button>
     </div>
   </footer>
 </div>
@@ -1521,8 +1534,13 @@ playBtn.addEventListener('click', () => {
   playing = !playing;
   playBtn.innerHTML = playing ? '&#10073;&#10073;' : '&#9658;';
 });
-document.getElementById('restart').addEventListener('click', () => {
+document.getElementById('toStart').addEventListener('click', () => {
   pos = 0; seek.value = 0;
+  playing = false; playBtn.innerHTML = '&#9658;';
+});
+document.getElementById('toEnd').addEventListener('click', () => {
+  pos = frames.length - 1; seek.value = pos;
+  playing = false; playBtn.innerHTML = '&#9658;';
 });
 document.getElementById('rotate').addEventListener('click', () => {
   rotationSteps = (rotationSteps + 1) % 4;
