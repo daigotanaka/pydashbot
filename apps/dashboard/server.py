@@ -1067,9 +1067,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="ctrl" id="play" title="Play / pause">&#9658;</button>
     <div class="scrub">
       <div class="scrub-row">
-        <button class="ghost jump" id="toStart" title="Jump to beginning">&#9664;</button>
+        <button class="ghost jump" id="toStart" title="Jump to beginning">&#124;&#9664;</button>
         <input type="range" id="seek" min="0" max="0" value="0" step="1">
-        <button class="ghost jump" id="toEnd" title="Jump to end">&#9654;</button>
+        <button class="ghost jump" id="toEnd" title="Jump to end">&#9654;&#124;</button>
       </div>
       <div class="ticks">
         <span id="frameLabel">frame 0</span>
