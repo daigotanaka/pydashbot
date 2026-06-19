@@ -99,6 +99,9 @@ ODOMETRY_MAX_TURN_DISTANCE_MM = 150
 # (heading = (right - left) * mm_per_wheel_tick / track_width); see README.
 TRACK_WIDTH_MM = 87.0
 ODOMETRY_SLIP_HEADING_DEG = 45
+COMMON_MODE_SLIP_MIN_DISTANCE_MM = 150
+COMMON_MODE_SLIP_FULL_REQUEST_RATIO = 0.9
+COMMON_MODE_SLIP_LEGACY_MAX_REQUEST_MM = 500
 # Loop closure must be a small drift nudge against a genuinely co-located wall,
 # not a teleport toward a different wall. A wide match radius binds an
 # observation to the wrong wall and a large max correction then jumps the pose
@@ -360,6 +363,44 @@ def validate_odometry(
         if abs(wheel_heading_delta - heading_delta) > ODOMETRY_SLIP_HEADING_DEG:
             issues.append('wheel rotation inconsistent with gyro (suspected wheel slip)')
     return issues
+
+
+def blocked_common_mode_slip_issue(
+    action,
+    requested,
+    distance_mm,
+    motion_outcome=None,
+    front_blocked=False,
+):
+    """Return a common-mode slip issue when a blocked leg logged bogus travel."""
+    if action != 'forward':
+        return None
+    if abs(distance_mm) < COMMON_MODE_SLIP_MIN_DISTANCE_MM:
+        return None
+
+    requested = abs(requested)
+    halt = (motion_outcome or {}).get('halt')
+    phase = (motion_outcome or {}).get('phase')
+    if halt == 'obstacle' and phase == 'before_start':
+        return 'front obstacle before start but wheels measured forward travel'
+    if (
+        halt == 'obstacle'
+        and phase == 'moving'
+        and abs(distance_mm) >= requested * COMMON_MODE_SLIP_FULL_REQUEST_RATIO
+    ):
+        return 'front obstacle stop with near-full wheel travel (suspected common-mode slip)'
+
+    # Older map files did not record the move() outcome. Keep a narrow fallback
+    # for the original failure mode: a short boundary-limited probe that ends
+    # blocked but claims essentially the full requested distance.
+    if (
+        motion_outcome is None
+        and front_blocked
+        and requested <= COMMON_MODE_SLIP_LEGACY_MAX_REQUEST_MM
+        and abs(distance_mm) >= requested * COMMON_MODE_SLIP_FULL_REQUEST_RATIO
+    ):
+        return 'front obstacle with near-full wheel travel (suspected common-mode slip)'
+    return None
 
 
 def accepted_runs(data):
@@ -1388,6 +1429,49 @@ class _ExplorationRun:
         )
         return True
 
+    def reject_blocked_common_mode_slip(
+        self,
+        previous_position,
+        known_path_len,
+        traveled,
+        requested_distance,
+        motion_outcome,
+        left,
+        right,
+    ):
+        """Discard a blocked straight leg whose wheels likely spun in place."""
+        issue = blocked_common_mode_slip_issue(
+            'forward',
+            requested_distance,
+            traveled,
+            motion_outcome=motion_outcome,
+            front_blocked=left >= PROX_THRESHOLD or right >= PROX_THRESHOLD,
+        )
+        if not issue:
+            return False
+
+        previous_x, previous_y = previous_position
+        self.x, self.y = previous_x, previous_y
+        self.path[-1] = (self.x, self.y, self.heading)
+        del self.known_path[known_path_len:]
+
+        event = self.events[-1]
+        event['accepted'] = False
+        event.setdefault('issues', []).append(issue)
+        event['common_mode_slip_rejected'] = {
+            'previous_position': previous_position,
+            'distance_mm': traveled,
+            'requested': requested_distance,
+            'prox_left': left,
+            'prox_right': right,
+            **({'motion_outcome': motion_outcome} if motion_outcome else {}),
+        }
+        self.quality['rejected_updates'] += 1
+        self.quality['tracking_lost'] = True
+        self.quality['issues'].append(issue)
+        print(f"\n  [odometry rejected] {issue}")
+        return True
+
     def mark_ahead(self, points, landmarks, offset):
         if self.quality['tracking_lost']:
             return
@@ -1457,6 +1541,7 @@ class _ExplorationRun:
         record_early_stop_obstacle=True,
         previous_position=None,
         known_path_len=None,
+        motion_outcome=None,
     ):
         left = send_command('get_prox_left')['result']
         right = send_command('get_prox_right')['result']
@@ -1465,6 +1550,16 @@ class _ExplorationRun:
 
         if left >= PROX_THRESHOLD or right >= PROX_THRESHOLD:
             if previous_position is not None:
+                if self.reject_blocked_common_mode_slip(
+                    previous_position,
+                    known_path_len,
+                    traveled,
+                    requested_distance,
+                    motion_outcome,
+                    left,
+                    right,
+                ):
+                    return left, right, tilt, 'odometry rejected', None, False
                 self.reject_blocked_territory_transition(
                     previous_position, known_path_len
                 )
@@ -1569,6 +1664,8 @@ class _ExplorationRun:
                 )
                 print(f"\n  [preset halted] {issue}")
                 break
+            previous_position = (self.x, self.y)
+            known_path_len = len(self.known_path)
             traveled = self.update_pose('forward', value)
             self.events[-1]['motion_outcome'] = response['result']
             if traveled is None:
@@ -1577,6 +1674,9 @@ class _ExplorationRun:
                 traveled,
                 value,
                 record_early_stop_obstacle=command['stop_at_obstacle'],
+                previous_position=previous_position,
+                known_path_len=known_path_len,
+                motion_outcome=response['result'],
             )
             self.report_leg(0.0, traveled, left, right, tilt)
             if back_away:
@@ -1607,7 +1707,7 @@ class _ExplorationRun:
                     continue
                 self.redirect('exploration boundary')
                 continue
-            send_command(
+            response = send_command(
                 'move',
                 requested_distance,
                 FORWARD_SPEED_MMPS,
@@ -1616,6 +1716,7 @@ class _ExplorationRun:
             previous_position = (self.x, self.y)
             known_path_len = len(self.known_path)
             traveled = self.update_pose('forward', requested_distance)
+            self.events[-1]['motion_outcome'] = response['result']
             remaining = max(0.0, end_time - time.time())
             if traveled is None:
                 left = send_command('get_prox_left')['result']
@@ -1632,6 +1733,7 @@ class _ExplorationRun:
                     policy_limit_reached,
                     previous_position=previous_position,
                     known_path_len=known_path_len,
+                    motion_outcome=response['result'],
                 )
             self.report_leg(remaining, traveled, left, right, tilt)
 

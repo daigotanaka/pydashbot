@@ -669,6 +669,42 @@ class MappingStrategyTests(unittest.TestCase):
         )
         self.assertEqual(issues, [])
 
+    def test_common_mode_slip_rejects_obstacle_stop_with_full_wheel_travel(self):
+        issue = map_room.blocked_common_mode_slip_issue(
+            "forward",
+            325,
+            337,
+            motion_outcome={"halt": "obstacle", "phase": "moving"},
+            front_blocked=True,
+        )
+        self.assertEqual(
+            issue,
+            "front obstacle stop with near-full wheel travel (suspected common-mode slip)",
+        )
+
+    def test_common_mode_slip_accepts_obstacle_stop_after_partial_progress(self):
+        issue = map_room.blocked_common_mode_slip_issue(
+            "forward",
+            450,
+            293,
+            motion_outcome={"halt": "obstacle", "phase": "moving"},
+            front_blocked=True,
+        )
+        self.assertIsNone(issue)
+
+    def test_common_mode_slip_legacy_fallback_rejects_short_blocked_probe(self):
+        issue = map_room.blocked_common_mode_slip_issue(
+            "forward",
+            325,
+            337,
+            motion_outcome=None,
+            front_blocked=True,
+        )
+        self.assertEqual(
+            issue,
+            "front obstacle with near-full wheel travel (suspected common-mode slip)",
+        )
+
     def test_odometry_slip_check_excludes_turns(self):
         # A turn where the wheels imply far more rotation than the gyro saw is
         # not a pose-corrupting slip (heading comes from the gyro, translation
@@ -774,6 +810,55 @@ class MappingStrategyTests(unittest.TestCase):
             run.events[-1]['territory_transition_rejected'],
             {'from': (0, -1), 'to': (0, 0)},
         )
+
+    def test_blocked_common_mode_slip_rolls_back_same_territory_leg(self):
+        run = object.__new__(map_room._ExplorationRun)
+        run.x, run.y, run.heading = 873, 853, 82
+        run.path = [(827, 518, 84), (873, 853, 82)]
+        run.known_path = [(827, 518), (873, 853)]
+        run.baseline_pitch = 0
+        run.events = [
+            {
+                "action": "forward",
+                "requested": 325,
+                "distance_mm": 337,
+                "accepted": True,
+            }
+        ]
+        run.quality = {
+            "tracking_lost": False,
+            "rejected_updates": 0,
+            "issues": [],
+        }
+
+        with patch.object(
+            map_room,
+            "send_command",
+            side_effect=[
+                {"result": map_room.PROX_THRESHOLD},
+                {"result": 0},
+                {"result": 0},
+            ],
+        ):
+            left, right, tilt, reason, sounds, back_away = run.handle_leg_end(
+                337,
+                325,
+                previous_position=(827, 518),
+                known_path_len=1,
+                motion_outcome={"halt": "obstacle", "phase": "moving"},
+            )
+
+        self.assertEqual((left, right, tilt), (map_room.PROX_THRESHOLD, 0, 0))
+        self.assertEqual(reason, "odometry rejected")
+        self.assertIsNone(sounds)
+        self.assertFalse(back_away)
+        self.assertEqual((run.x, run.y), (827, 518))
+        self.assertEqual(run.path[-1], (827, 518, 82))
+        self.assertEqual(run.known_path, [(827, 518)])
+        self.assertTrue(run.quality["tracking_lost"])
+        self.assertEqual(run.quality["rejected_updates"], 1)
+        self.assertFalse(run.events[-1]["accepted"])
+        self.assertIn("common_mode_slip_rejected", run.events[-1])
 
     def test_strategy_avoids_known_blockers(self):
         blockers = [(400, 0), (800, 0), (1200, 0)]

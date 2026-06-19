@@ -777,11 +777,19 @@ There are two distinct cases, with different detectability:
    bogus 429 mm of travel, corrupting every later pose and leaving
    `run_pose_trustworthy` wrongly calling the final pose safe. It is now rejected.
 
-2. **Common-mode slip (both wheels) — still open.** Both tires spin equally while
-   Dash sits still or is high-centered on a bump. This is the hard case: equal
-   left and right deltas with no rotation look like a perfectly valid straight
-   move, so the wheel-vs-gyro check above cannot see it. Catching it needs a
-   signal independent of the wheels:
+2. **Common-mode slip (both wheels) — partially detected.** Both tires spin
+   equally while Dash sits still or is high-centered on a bump. This is the hard
+   case: equal left and right deltas with no rotation look like a perfectly
+   valid straight move, so the wheel-vs-gyro check above cannot see it. The
+   mapper now rejects one important wall-contact case: if an obstacle-aware
+   forward move reports a front obstacle stop, but wheel odometry still claims a
+   near-full requested leg (or a before-start obstacle still logs substantial
+   travel), the just-committed translation is rolled back, the event is marked
+   `common_mode_slip_rejected`, and the run stops with `tracking_lost` rather
+   than continuing from a drifted pose. Call paths that do not provide a move
+   outcome get a narrow fallback for short, blocked, near-full-distance probes.
+   Catching the broader cases still needs another signal independent of the
+   wheels:
    - **Accelerometer / pitch.** A real forward move produces acceleration
      transients and, climbing a bump, a pitch spike. Wheels advancing with a flat
      accelerometer (no motion) or a pitch event (stuck on a bump) is suspicious.
@@ -792,10 +800,10 @@ There are two distinct cases, with different detectability:
      This only works near mapped features (it is a stricter cousin of the
      existing loop-closure revisit correction).
 
-   On suspected common-mode slip the response should mirror the differential
-   case: stop the run, mark the segment uncertain (as implausible odometry is
-   already isolated), and re-reference against a known wall or require re-docking
-   rather than trusting the drifted pose.
+   On suspected common-mode slip the response mirrors the differential case:
+   stop the run, mark the segment uncertain (as implausible odometry is already
+   isolated), and re-reference against a known wall or require re-docking rather
+   than trusting the drifted pose.
 
 Safety and correctness constraints:
 
