@@ -1,6 +1,6 @@
 import unittest
 
-from apps.map import dashboard
+from apps.dashboard import server as dashboard
 
 
 class DashboardTests(unittest.TestCase):

@@ -42,6 +42,7 @@ pydashbot = "dash.remote.client:main"
 pydashbot-server = "dash.remote.server:main"
 "dash.remote.server" = "dash.remote.server:main"
 "apps.map" = "apps.map.main:main"
+"apps.dashboard" = "apps.dashboard.server:main"
 
 [tool.setuptools.packages.find]
 include = ["dash*", "apps*"]

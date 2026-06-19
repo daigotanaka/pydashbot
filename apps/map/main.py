@@ -14,6 +14,8 @@ import json
 import math
 import random
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -300,6 +302,33 @@ def validate_dashboard_config(dashboard, parser):
         parser.error("config dashboard.port must be between 1 and 65535")
     merged['port'] = port
     return merged
+
+
+class DashboardPublisher:
+    """Publish robot poses to a separately running live dashboard server.
+
+    The dashboard is its own app (``python -m apps.dashboard``); start it
+    first, then run a mapping session with ``dashboard.active: true``. This
+    client just POSTs each pose to the server's ``/move`` endpoint -- nothing in
+    the mapping app imports the dashboard package.
+    """
+
+    def __init__(self, host, port, timeout=1.0):
+        # 0.0.0.0 is a valid bind address for the server but not a connect
+        # target; reach a server bound to all interfaces via the loopback.
+        connect_host = '127.0.0.1' if host in ('', '0.0.0.0') else host
+        self.url = f'http://{connect_host}:{port}/move'
+        self.timeout = timeout
+
+    def post_move(self, move):
+        body = json.dumps(move).encode('utf-8')
+        request = urllib.request.Request(
+            self.url,
+            data=body,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        urllib.request.urlopen(request, timeout=self.timeout).close()
 
 
 def validate_policy_config(policy, parser):
@@ -1268,6 +1297,7 @@ class _ExplorationRun:
         self.duration = duration
         self.command_policy = command_policy
         self.dashboard = dashboard
+        self._dashboard_warned = False
 
         self.yaw_prev = send_command('get_yaw')['result']
         self.left_prev = send_command('get_left_wheel')['result']
@@ -1364,7 +1394,14 @@ class _ExplorationRun:
                 move['duration'] = duration
             self.dashboard.post_move(move)
         except Exception as exc:
-            print(f"\n  [dashboard warning] failed to publish pose: {exc}")
+            # Warn once: with the dashboard server down this would otherwise
+            # fire on every pose. Mapping continues regardless.
+            if not self._dashboard_warned:
+                print(
+                    f"\n  [dashboard warning] failed to publish pose "
+                    f"(is the dashboard server running?): {exc}"
+                )
+                self._dashboard_warned = True
 
     def update_pose(self, action, requested):
         yaw_now = read_settled('get_yaw')
@@ -2015,54 +2052,47 @@ def main(args=None):
         heading0 = 0.0
 
     img_path = map_file.with_suffix('.png')
-    dashboard_server = None
+    # The live dashboard is a separate app (python -m apps.dashboard); when
+    # enabled, publish poses to it over HTTP rather than hosting it in-process.
     live_dashboard = None
     if options.dashboard['active'] and options.mode != 'dock':
-        try:
-            from apps.map.dashboard import start_dashboard_server
-        except ModuleNotFoundError:
-            from dashboard import start_dashboard_server
-        dashboard_server, live_dashboard, _dashboard_thread = start_dashboard_server(
-            options.dashboard['host'],
-            options.dashboard['port'],
-            'Dash Live Map Dashboard',
-            options.territory_size,
+        live_dashboard = DashboardPublisher(
+            options.dashboard['host'], options.dashboard['port']
         )
         print(
-            f"Dashboard listening on "
-            f"http://{options.dashboard['host']}:{options.dashboard['port']}"
+            f"Publishing live poses to dashboard at "
+            f"http://{options.dashboard['host']}:{options.dashboard['port']} "
+            f"(start it with: python -m apps.dashboard "
+            f"--host {options.dashboard['host']} "
+            f"--port {options.dashboard['port']} "
+            f"--territory-size {options.territory_size:g})"
         )
 
-    try:
-        if options.mode == 'dock':
-            produced_runs = go_home_with_retries(
-                strategy_map,
+    if options.mode == 'dock':
+        produced_runs = go_home_with_retries(
+            strategy_map,
+            deg_per_yaw,
+            mm_per_wd,
+            strategy=GO_HOME_STRATEGIES[options.go_home_strategy],
+        )
+        if not produced_runs:
+            return
+    else:
+        produced_runs = [
+            explore(
                 deg_per_yaw,
                 mm_per_wd,
-                strategy=GO_HOME_STRATEGIES[options.go_home_strategy],
+                x0,
+                y0,
+                heading0,
+                strategy_map,
+                duration=options.duration,
+                territory_mm=options.territory_size,
+                command_policy=command_policy,
+                exploration_policy=options.exploration_policy,
+                dashboard=live_dashboard,
             )
-            if not produced_runs:
-                return
-        else:
-            produced_runs = [
-                explore(
-                    deg_per_yaw,
-                    mm_per_wd,
-                    x0,
-                    y0,
-                    heading0,
-                    strategy_map,
-                    duration=options.duration,
-                    territory_mm=options.territory_size,
-                    command_policy=command_policy,
-                    exploration_policy=options.exploration_policy,
-                    dashboard=live_dashboard,
-                )
-            ]
-    finally:
-        if dashboard_server is not None:
-            dashboard_server.shutdown()
-            dashboard_server.server_close()
+        ]
     for run in produced_runs:
         save_map(
             deg_per_yaw,

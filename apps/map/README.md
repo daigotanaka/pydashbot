@@ -350,15 +350,30 @@ retitle with `--title`, or override the recorded territory size with
 - Replays the robot leg by leg as a top-view Dash avatar (the three-sphere
   body, head dome, and orange eye), with a glowing path trail.
 
-`dashboard.py` serves the live dashboard.
+The live dashboard is a **separate app** ([`apps/dashboard`](../dashboard)) that
+runs independently of the mapper. Start it first, then run a mapping session —
+the two communicate over HTTP, so the mapper never hosts the server in-process.
 
-Start the live dashboard:
+Start the live dashboard (use a `--territory-size` matching the run's
+`territory_size_mm` so the cell grid lines up):
 
 ```bash
-uv run --extra tools apps/map/dashboard.py --host 0.0.0.0 --port 8000
+uv run apps.dashboard --host 0.0.0.0 --port 8000 --territory-size 1000
+# or, without uv:
+python -m apps.dashboard --host 0.0.0.0 --port 8000 --territory-size 1000
 ```
 
-Post live poses to it:
+Then run a mapping session with the dashboard enabled in `config.yaml`:
+
+```yaml
+dashboard:
+  active: true
+  host: 0.0.0.0   # where the dashboard server is reachable
+  port: 8000
+```
+
+With `dashboard.active: true`, the mapper POSTs each pose to the running
+server's `/move` endpoint as it explores. You can also post poses by hand:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/move \

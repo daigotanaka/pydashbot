@@ -16,28 +16,23 @@ live session as a standalone static HTML replay.
 
 import argparse
 import json
+import math
 import threading
 from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-try:
-    from apps.map.policies.conservative_exploration import (
-        GRID_CELLS,
-        TERRITORY_MM,
-        densify_path,
-        territory_resolution,
-    )
-    from apps.map.exploration_walls import inferred_wall_segments
-except ModuleNotFoundError:
-    from policies.conservative_exploration import (
-        GRID_CELLS,
-        TERRITORY_MM,
-        densify_path,
-        territory_resolution,
-    )
-    from exploration_walls import inferred_wall_segments
+# The dashboard depends only on the mapping library's geometry helpers; it does
+# not import the mapping application's runtime, and the mapping app does not
+# import the dashboard. The two communicate at runtime over HTTP (POST /move).
+from apps.map.policies.conservative_exploration import (
+    GRID_CELLS,
+    TERRITORY_MM,
+    densify_path,
+    territory_resolution,
+)
+from apps.map.exploration_walls import inferred_wall_segments
 
 
 def accepted_runs(data):
@@ -337,6 +332,111 @@ def frame_from_move(move, index):
     }
 
 
+def _live_territory(x, y, territory_mm):
+    """Territory (column, row) index holding world point (x, y)."""
+    return (math.floor(x / territory_mm), math.floor(y / territory_mm))
+
+
+def recompute_wall_segments(payload):
+    """Rebuild inferred wall segments from the walls observed so far.
+
+    Produces the same shape the static payload carries -- each segment is
+    `[[x, y], [x, y], reveal]` and is revealed once both of its endpoint walls
+    have been (the later of the two reveal frames).
+    """
+    walls = payload['walls']
+    wall_points = [(w[0], w[1]) for w in walls]
+    segments = inferred_wall_segments(wall_points, max_distance=payload['grid_mm'])
+
+    def nearest_wall_reveal(point):
+        best, best_d = 0, float('inf')
+        for wx, wy, reveal in walls:
+            d = (wx - point[0]) ** 2 + (wy - point[1]) ** 2
+            if d < best_d:
+                best_d, best = d, reveal
+        return best
+
+    payload['wall_segments'] = [
+        [
+            [round(seg[0][0], 2), round(seg[0][1], 2)],
+            [round(seg[1][0], 2), round(seg[1][1], 2)],
+            max(nearest_wall_reveal(seg[0]), nearest_wall_reveal(seg[1])),
+        ]
+        for seg in segments
+    ]
+
+
+def resolve_live_cells(payload):
+    """Recompute live territories, focus, and per-frame cell states.
+
+    Mirrors the static `build_frames` cumulative resolution so the live
+    dashboard colours cells (visited / frontier / blocked / unreachable)
+    exactly like the saved animation. Each frame resolves the densified path
+    *prefix* traversed so far against only the blockers and wall segments
+    revealed up to that frame, so a visited cell stays visited as the robot
+    moves on rather than reverting to frontier.
+    """
+    territory_mm = payload['territory_mm']
+    grid_mm = payload['grid_mm']
+    frames = payload['frames']
+
+    # Territories the robot has entered, in first-seen order, plus the focus
+    # (the territory holding the most recent pose).
+    territories = []
+    for frame in frames:
+        territory = _live_territory(frame['x'], frame['y'], territory_mm)
+        if territory not in territories:
+            territories.append(territory)
+    focus = (
+        _live_territory(frames[-1]['x'], frames[-1]['y'], territory_mm)
+        if frames
+        else tuple(payload.get('focus', (0, 0)))
+    )
+    if focus not in territories:
+        territories.append(focus)
+    if not territories:
+        territories = [(0, 0)]
+
+    segments_rev = [
+        (((seg[0][0], seg[0][1]), (seg[1][0], seg[1][1])), seg[2])
+        for seg in payload.get('wall_segments', [])
+    ]
+
+    traversed = []  # densified points accumulated across frames
+    for gi, frame in enumerate(frames):
+        if gi > 0:
+            prev = frames[gi - 1]
+            segment = densify_path(
+                [(prev['x'], prev['y']), (frame['x'], frame['y'])], grid_mm / 2
+            )
+            traversed.extend(segment[1:] if traversed else segment)
+        elif not traversed:
+            traversed.append((frame['x'], frame['y']))
+
+        blockers = [
+            (b[0], b[1]) for b in payload['walls'] if b[2] <= gi
+        ] + [
+            (b[0], b[1]) for b in payload['obstacles'] if b[2] <= gi
+        ]
+        wall_segments = [seg for seg, reveal in segments_rev if reveal <= gi]
+
+        cells = {}
+        for territory in territories:
+            resolution = territory_resolution(
+                territory, traversed, blockers, wall_segments, territory_mm
+            )
+            states = cell_state_lookup(resolution)
+            cells[f'{territory[0]},{territory[1]}'] = {
+                f'{cx},{cy}': states.get((cx, cy), 'frontier')
+                for cx in range(GRID_CELLS)
+                for cy in range(GRID_CELLS)
+            }
+        frame['cells'] = cells
+
+    payload['territories'] = [list(t) for t in territories]
+    payload['focus'] = list(focus)
+
+
 def apply_live_move(payload, move):
     """Append a posted move to a live animation payload."""
     frame = frame_from_move(move, len(payload['frames']))
@@ -351,7 +451,15 @@ def apply_live_move(payload, move):
         payload['durations'].append(round(float(duration), 3))
     for name in ('walls', 'obstacles'):
         for point in move.get(name, []):
-            payload[name].append([float(point[0]), float(point[1]), len(payload['frames']) - 1])
+            payload[name].append(
+                [round(float(point[0]), 2), round(float(point[1]), 2),
+                 len(payload['frames']) - 1]
+            )
+    # Recompute inferred wall geometry and the cumulative cell resolution so the
+    # live payload matches what the static animation would render for the same
+    # poses (see resolve_live_cells).
+    recompute_wall_segments(payload)
+    resolve_live_cells(payload)
     return frame
 
 
@@ -376,8 +484,30 @@ class LiveDashboard:
         return render_html(payload, self.title)
 
 
-def dashboard_page(title):
-    return LIVE_DASHBOARD_TEMPLATE.replace('__TITLE__', title)
+def dashboard_page(dashboard):
+    """Return the live page using the same UI shell as the static animation."""
+    payload = dashboard.snapshot()
+    territory_mm = payload.get('territory_mm', TERRITORY_MM)
+    initial_payload = empty_payload(territory_mm)
+    apply_live_move(initial_payload, {'pose': [0, 0, 0], 'duration': 0})
+    html = render_html(initial_payload, dashboard.title)
+    html = html.replace(
+        'button.ghost {',
+        'button.ghost, a.ghost {',
+    ).replace(
+        'button.ghost:hover {',
+        'button.ghost:hover, a.ghost:hover {',
+    ).replace(
+        '<button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>',
+        '<button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>\n'
+        '    <a class="ghost" id="saveAnimation" href="/animation.html" '
+        'title="Save standalone animation">Save animation</a>',
+    ).replace(
+        '  .speed {',
+        '  a.ghost { display: inline-flex; align-items: center; text-decoration: none; }\n'
+        '  .speed {',
+    )
+    return html.replace('</body>', LIVE_DASHBOARD_SCRIPT + '\n</body>')
 
 
 def make_handler(dashboard):
@@ -405,7 +535,7 @@ def make_handler(dashboard):
             parsed = urlparse(self.path)
             if parsed.path in ('/', '/index.html'):
                 self.send_bytes(
-                    dashboard_page(dashboard.title).encode('utf-8'),
+                    dashboard_page(dashboard).encode('utf-8'),
                     'text/html; charset=utf-8',
                 )
             elif parsed.path == '/state':
@@ -1270,208 +1400,80 @@ requestAnimationFrame(tick);
 """
 
 
-LIVE_DASHBOARD_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__TITLE__</title>
-<style>
-  :root {
-    --bg: #10141f;
-    --panel: #171d2d;
-    --ink: #edf2ff;
-    --muted: #9aa6c7;
-    --accent: #4f8cff;
-    --grid: #2b3658;
-    --path: #6fb3ff;
-    --wall: #ff5d5d;
-    --obstacle: #ffa64d;
-  }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  .app { height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
-  header, footer { background: var(--panel); border-color: var(--grid); }
-  header { padding: 14px 18px; border-bottom: 1px solid var(--grid);
-    display: flex; gap: 16px; align-items: baseline; }
-  h1 { margin: 0; font-size: 16px; }
-  .sub { color: var(--muted); font-size: 13px; }
-  main { min-height: 0; position: relative; }
-  canvas { width: 100%; height: 100%; display: block; background:
-    radial-gradient(900px 600px at 65% 10%, #1d2a43, transparent), var(--bg); }
-  aside { position: absolute; right: 14px; top: 14px; width: 260px; padding: 14px;
-    background: rgba(23,29,45,.92); border: 1px solid var(--grid); border-radius: 8px; }
-  .stat { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin: 7px 0;
-    color: var(--muted); font-size: 13px; }
-  .stat b { color: var(--ink); font-variant-numeric: tabular-nums; }
-  footer { padding: 12px 18px; border-top: 1px solid var(--grid);
-    display: flex; gap: 10px; align-items: center; }
-  button, a.button { height: 34px; border-radius: 7px; border: 1px solid var(--grid);
-    background: #202840; color: var(--ink); padding: 0 12px; text-decoration: none;
-    display: inline-flex; align-items: center; cursor: pointer; font-size: 13px; }
-  button.primary, a.primary { background: var(--accent); border-color: var(--accent); color: white; }
-  code { color: #c9d6ff; }
-</style>
-</head>
-<body>
-<div class="app">
-  <header>
-    <h1>__TITLE__</h1>
-    <span class="sub" id="status">waiting for moves</span>
-  </header>
-  <main>
-    <canvas id="view"></canvas>
-    <aside>
-      <div class="stat"><span>frames</span><b id="frames">0</b></div>
-      <div class="stat"><span>pose</span><b id="pose">-</b></div>
-      <div class="stat"><span>heading</span><b id="heading">-</b></div>
-      <div class="stat"><span>last update</span><b id="updated">-</b></div>
-      <p class="sub">POST <code>/move</code> with <code>{"pose":[x,y,heading]}</code>.</p>
-    </aside>
-  </main>
-  <footer>
-    <button class="primary" id="follow">Follow</button>
-    <a class="button primary" href="/animation.html">Save animation</a>
-    <button id="clearView">Reset view</button>
-  </footer>
-</div>
-<script>
-const canvas = document.getElementById('view');
-const ctx = canvas.getContext('2d');
-let payload = null;
-let current = null;
-let target = null;
-let follow = true;
-let view = { scale: 1, ox: 0, oy: 0 };
+LIVE_DASHBOARD_SCRIPT = r"""<script>
+// Live dashboard adapter: keep the animation UI, but replace its payload as
+// /state delivers new robot poses. The server resolves cells, territories,
+// focus, and wall segments exactly like the static animation, so this adapter
+// only swaps the data in and nudges the playhead -- the static template
+// intentionally owns all drawing, pan/zoom, rotate, scrub, speed, and the
+// Dash-avatar code.
+let liveFrameCount = 0;
 
-function resize() {
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = canvas.clientWidth * dpr;
-  canvas.height = canvas.clientHeight * dpr;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
-window.addEventListener('resize', resize);
-resize();
-
-function bounds(path) {
-  if (!path || !path.length) return { minX: -500, maxX: 500, minY: -500, maxY: 500 };
-  let minX = path[0][0], maxX = path[0][0], minY = path[0][1], maxY = path[0][1];
-  for (const p of path) { minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
-    minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]); }
-  const pad = 350;
-  return { minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad };
+function liveReplaceArray(target, source) {
+  target.length = 0;
+  for (const item of source) target.push(item);
 }
 
-function fit() {
-  const b = bounds(payload ? payload.path : []);
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  view.scale = Math.min(w / Math.max(1, b.maxX - b.minX), h / Math.max(1, b.maxY - b.minY));
-  view.ox = w / 2 - ((b.minX + b.maxX) / 2) * view.scale;
-  view.oy = h / 2 + ((b.minY + b.maxY) / 2) * view.scale;
-}
-document.getElementById('clearView').onclick = fit;
-document.getElementById('follow').onclick = () => { follow = !follow; document.getElementById('follow').textContent = follow ? 'Follow' : 'Free view'; };
-
-function sx(x) { return view.ox + x * view.scale; }
-function sy(y) { return view.oy - y * view.scale; }
-
-function lerp(a, b, t) { return a + (b - a) * t; }
-function lerpHeading(a, b, t) {
-  const d = ((b - a + 540) % 360) - 180;
-  return a + d * t;
-}
-
-async function poll() {
+async function livePoll() {
   try {
     const res = await fetch('/state', { cache: 'no-store' });
     const next = await res.json();
-    payload = next;
-    const frames = next.frames || [];
-    if (frames.length) {
-      const f = frames[frames.length - 1];
-      if (!current) current = { ...f };
-      target = { ...f };
-      if (follow) fit();
+    // Always keep at least one frame and one territory so the static template's
+    // draw/HUD code never indexes into empty arrays before the first move.
+    const nextFrames = (next.frames && next.frames.length)
+      ? next.frames
+      : [{ run: 0, node: 0, timestamp: '', x: 0, y: 0, heading: 0, cells: {} }];
+    const previousCount = liveFrameCount;
+    liveFrameCount = next.frames ? next.frames.length : 0;
+
+    liveReplaceArray(DATA.focus, next.focus || [0, 0]);
+    liveReplaceArray(
+      DATA.territories,
+      (next.territories && next.territories.length) ? next.territories : [[0, 0]]
+    );
+    liveReplaceArray(DATA.frames, nextFrames);
+    liveReplaceArray(
+      DATA.path,
+      (next.path && next.path.length) ? next.path : [[0, 0]]
+    );
+    liveReplaceArray(DATA.durations, next.durations || []);
+    liveReplaceArray(DATA.walls, next.walls || []);
+    liveReplaceArray(DATA.obstacles, next.obstacles || []);
+    liveReplaceArray(DATA.wall_segments, next.wall_segments || []);
+    DATA.run_count = next.run_count || 1;
+
+    bounds = computeBounds();
+    seek.max = Math.max(0, DATA.frames.length - 1);
+    if (pos > DATA.frames.length - 1) pos = DATA.frames.length - 1;
+
+    // When new poses arrive and the playhead was riding the live edge, advance
+    // it so the freshly added leg animates; if the user has scrubbed back, leave
+    // their position alone.
+    if (liveFrameCount > previousCount) {
+      if (previousCount === 0 || pos >= previousCount - 1) {
+        pos = Math.max(0, liveFrameCount - 2);
+        playing = true;
+        playBtn.innerHTML = '&#10073;&#10073;';
+      }
+      fitView();
     }
-    document.getElementById('status').textContent = frames.length ? 'live' : 'waiting for moves';
-    document.getElementById('frames').textContent = frames.length;
-    document.getElementById('updated').textContent = new Date().toLocaleTimeString();
+
+    const status = liveFrameCount ? 'live' : 'waiting for moves';
+    const liveSeconds = DATA.durations.reduce((a, b) => a + b, 0);
+    headerSub.textContent =
+      status + ' · ' +
+      DATA.territories.length + ' territories · ' +
+      DATA.run_count + ' run' + (DATA.run_count > 1 ? 's' : '') + ' · ' +
+      TMM + ' mm territory · ' + GRID + '×' + GRID + ' cells · ' +
+      '~' + Math.round(liveSeconds) + ' s at 1×';
   } catch (err) {
-    document.getElementById('status').textContent = 'server unavailable';
-  }
-}
-setInterval(poll, 500);
-poll();
-
-function drawGrid() {
-  const step = 250;
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  ctx.strokeStyle = 'rgba(154,166,199,.13)';
-  ctx.lineWidth = 1;
-  const left = (-view.ox) / view.scale;
-  const right = (w - view.ox) / view.scale;
-  const bottom = (view.oy - h) / view.scale;
-  const top = view.oy / view.scale;
-  for (let x = Math.floor(left / step) * step; x <= right; x += step) {
-    ctx.beginPath(); ctx.moveTo(sx(x), 0); ctx.lineTo(sx(x), h); ctx.stroke();
-  }
-  for (let y = Math.floor(bottom / step) * step; y <= top; y += step) {
-    ctx.beginPath(); ctx.moveTo(0, sy(y)); ctx.lineTo(w, sy(y)); ctx.stroke();
+    headerSub.textContent = 'server unavailable';
   }
 }
 
-function drawPath() {
-  const path = payload ? payload.path || [] : [];
-  if (path.length < 2) return;
-  ctx.strokeStyle = '#6fb3ff';
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  ctx.moveTo(sx(path[0][0]), sy(path[0][1]));
-  for (let i = 1; i < path.length; i++) ctx.lineTo(sx(path[i][0]), sy(path[i][1]));
-  ctx.stroke();
-}
-
-function drawRobot() {
-  if (!current || !target) return;
-  current.x = lerp(current.x, target.x, 0.12);
-  current.y = lerp(current.y, target.y, 0.12);
-  current.heading = lerpHeading(current.heading, target.heading, 0.12);
-  const x = sx(current.x), y = sy(current.y);
-  const r = Math.max(11, 95 * view.scale);
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(-current.heading * Math.PI / 180);
-  ctx.fillStyle = '#26a6da';
-  ctx.strokeStyle = '#9fe4fb';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, -r * 0.9);
-  ctx.lineTo(r * 0.62, r * 0.62);
-  ctx.lineTo(0, r * 0.3);
-  ctx.lineTo(-r * 0.62, r * 0.62);
-  ctx.closePath();
-  ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#ffa64d';
-  ctx.beginPath(); ctx.arc(0, -r * 0.42, Math.max(3, r * 0.14), 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-  document.getElementById('pose').textContent = Math.round(current.x) + ', ' + Math.round(current.y);
-  document.getElementById('heading').textContent = Math.round(current.heading) + '°';
-}
-
-function loop() {
-  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-  drawGrid();
-  drawPath();
-  drawRobot();
-  requestAnimationFrame(loop);
-}
-fit();
-loop();
-</script>
-</body>
-</html>
-"""
+setInterval(livePoll, 500);
+livePoll();
+</script>"""
 
 
 if __name__ == '__main__':
