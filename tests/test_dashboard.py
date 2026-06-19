@@ -47,6 +47,34 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(cells["2,0"], "blocked")
         self.assertEqual(cells["0,0"], "visited")
 
+    def test_export_replays_seeded_history_progressively(self):
+        live = dashboard.LiveDashboard(title="Live", territory_mm=1000)
+        # Resume: prior coverage of row cy=0 plus a prior wall, then one move.
+        live.seed(
+            {
+                "path": [[125, 125], [375, 125], [625, 125]],
+                "walls": [[875, 125]],
+                "obstacles": [],
+            }
+        )
+        live.post_move({"pose": [625, 375, 90]})
+
+        export = dashboard.export_payload(live.snapshot())
+
+        # The seed is consumed into leading frames rather than shown up front.
+        self.assertEqual(export["seed_path"], [])
+        self.assertEqual(len(export["durations"]), len(export["frames"]) - 1)
+        # The prior wall now reveals partway through the retrace, not at frame 0.
+        self.assertEqual(len(export["walls"]), 1)
+        self.assertGreater(export["walls"][0][2], 0)
+        # Frame 0 shows only where the retrace begins; coverage grows over frames.
+        first = export["frames"][0]["cells"]["0,0"]
+        last = export["frames"][-1]["cells"]["0,0"]
+        visited_first = sum(1 for v in first.values() if v == "visited")
+        visited_last = sum(1 for v in last.values() if v == "visited")
+        self.assertEqual(visited_first, 1)
+        self.assertGreater(visited_last, visited_first)
+
     def test_apply_seed_primes_prior_coverage(self):
         payload = dashboard.empty_payload(territory_mm=1000)
         # Column 0 visited; a wall barrier in column 1 cuts off columns 2-3.

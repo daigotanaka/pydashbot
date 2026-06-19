@@ -502,6 +502,77 @@ def apply_seed(payload, seed):
     resolve_live_cells(payload)
 
 
+# How long the replay dwells on each retraced prior-coverage point. Kept short
+# so seeded history fast-forwards rather than dragging out the saved animation.
+EXPORT_SEED_FRAME_SECONDS = 0.04
+
+
+def export_payload(payload):
+    """Build a standalone-animation payload that reveals progressively.
+
+    The live dashboard seeds prior-run coverage as `seed_path` plus blockers
+    revealed at frame 0, so the *live* view shows that context immediately. In a
+    saved replay that looks wrong -- every wall, obstacle, and visited/blocked/
+    unreachable cell is already present before the robot moves. Here the seeded
+    path becomes leading frames the replay retraces, and each wall/obstacle is
+    re-revealed at the frame whose pose lies nearest it, so the map fills in as
+    the robot reaches each feature, matching how the static map animation plays.
+    """
+    export = json.loads(json.dumps(payload))  # private deep copy to mutate
+    seed = export.pop('seed_path', None) or []
+
+    seed_frames = []
+    for i, point in enumerate(seed):
+        x, y = round(float(point[0]), 2), round(float(point[1]), 2)
+        if i + 1 < len(seed):
+            heading = math.degrees(
+                math.atan2(seed[i + 1][1] - point[1], seed[i + 1][0] - point[0])
+            )
+        else:
+            heading = seed_frames[-1]['heading'] if seed_frames else 0.0
+        seed_frames.append({
+            'run': 0, 'node': i, 'timestamp': '',
+            'x': x, 'y': y, 'heading': round(heading, 2), 'cells': {},
+        })
+
+    live_frames = export['frames']
+    frames = seed_frames + live_frames
+    if not frames:
+        frames = [{
+            'run': 0, 'node': 0, 'timestamp': '',
+            'x': 0, 'y': 0, 'heading': 0.0, 'cells': {},
+        }]
+    export['frames'] = frames
+    export['path'] = [[f['x'], f['y']] for f in frames]
+    export['seed_path'] = []
+
+    # Re-reveal every blocker at the frame whose pose is nearest it, across the
+    # combined retrace + live path, so seeded blockers no longer flash in at
+    # frame 0.
+    full_path = [(f['x'], f['y']) for f in frames]
+    for name in ('walls', 'obstacles'):
+        export[name] = [
+            [point[0], point[1], discovery_frame((point[0], point[1]), full_path, 0)]
+            for point in export[name]
+        ]
+
+    # One duration per frame transition (len(frames) - 1): a quick step through
+    # each retraced seed frame, then the live run's own recorded timing.
+    live_durations = export['durations']
+    if seed_frames and live_frames:
+        export['durations'] = (
+            [EXPORT_SEED_FRAME_SECONDS] * len(seed_frames) + live_durations
+        )
+    elif seed_frames:
+        export['durations'] = [EXPORT_SEED_FRAME_SECONDS] * (len(seed_frames) - 1)
+    else:
+        export['durations'] = live_durations
+
+    recompute_wall_segments(export)
+    resolve_live_cells(export)
+    return export
+
+
 class LiveDashboard:
     def __init__(self, title='Dash Live Map Dashboard', territory_mm=TERRITORY_MM):
         self.title = title
@@ -521,10 +592,7 @@ class LiveDashboard:
             apply_seed(self.payload, seed)
 
     def static_html(self):
-        payload = self.snapshot()
-        if not payload['frames']:
-            apply_live_move(payload, {'pose': [0, 0, 0], 'duration': 0})
-        return render_html(payload, self.title)
+        return render_html(export_payload(self.snapshot()), self.title)
 
 
 def dashboard_page(dashboard):
