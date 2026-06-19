@@ -1054,7 +1054,7 @@ const ctx = canvas.getContext('2d');
 // natural "into the room is up" view.
 let view = { scale: 1, ox: 0, oy: 0 };  // ox/oy in screen px
 let bounds = computeBounds();
-let rotationSteps = 0;  // 90-degree clockwise steps applied to the map view
+let rotationSteps = 1;  // 90-degree clockwise steps applied to the map view (start rotated 90° CW)
 
 function computeBounds() {
   let minX = -250, maxX = TMM + 250, minY = -250, maxY = TMM + 250;
@@ -1563,8 +1563,13 @@ canvas.addEventListener('mousedown', (e) => {
 });
 window.addEventListener('mousemove', (e) => {
   if (!drag) return;
-  view.ox = drag.ox + (e.clientX - drag.x);
-  view.oy = drag.oy + (e.clientY - drag.y);
+  // The map is drawn rotated about the canvas center, so a screen-space drag
+  // must be inverse-rotated for the content to follow the cursor.
+  const mdx = e.clientX - drag.x, mdy = e.clientY - drag.y;
+  const a = (((rotationSteps % 4) + 4) % 4) * Math.PI / 2;
+  const c = Math.cos(a), s = Math.sin(a);
+  view.ox = drag.ox + mdx * c + mdy * s;
+  view.oy = drag.oy - mdx * s + mdy * c;
 });
 window.addEventListener('mouseup', () => {
   drag = null; canvas.classList.remove('dragging');
@@ -1572,7 +1577,14 @@ window.addEventListener('mouseup', () => {
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  // Inverse-rotate the cursor about the canvas center so zoom keeps the point
+  // actually under the cursor fixed when the map is rotated.
+  const a = (((rotationSteps % 4) + 4) % 4) * Math.PI / 2;
+  const c = Math.cos(a), s = Math.sin(a);
+  const dx = (e.clientX - rect.left) - w / 2, dy = (e.clientY - rect.top) - h / 2;
+  const mx = w / 2 + dx * c + dy * s;
+  const my = h / 2 - dx * s + dy * c;
   const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
   // zoom toward cursor
   view.ox = mx - (mx - view.ox) * factor;
