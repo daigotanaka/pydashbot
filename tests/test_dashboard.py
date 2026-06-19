@@ -75,6 +75,49 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(visited_first, 1)
         self.assertGreater(visited_last, visited_first)
 
+    def test_load_map_renders_and_exports_verbatim(self):
+        live = dashboard.LiveDashboard(territory_mm=1000)
+        map_data = {
+            "schema_version": 2,
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [[125, 125, 0], [375, 125, 0]],
+                    "walls": [[875, 125]],
+                    "obstacles": [],
+                    "events": [{"action": "forward"}],
+                    "quality": {"tracking_lost": False},
+                    "conservative_exploration": {
+                        "territory_size_mm": 1000,
+                        "territories": [[0, 0]],
+                        "focus_territory": [0, 0],
+                    },
+                }
+            ],
+        }
+
+        payload = live.load_map(map_data)
+        self.assertTrue(payload["frames"])
+        # Export hands back the authoritative data, not a pose reconstruction.
+        self.assertEqual(live.map_for_export(), map_data)
+
+    def test_load_map_rejects_map_without_runs(self):
+        live = dashboard.LiveDashboard()
+        with self.assertRaises(ValueError):
+            live.load_map({"runs": []})
+
+    def test_export_falls_back_to_live_payload_synthesis(self):
+        live = dashboard.LiveDashboard(territory_mm=1000)
+        live.post_move({"pose": [125, 125, 0]})
+        live.post_move({"pose": [375, 125, 0], "walls": [[875, 125]]})
+
+        # No authoritative map uploaded -> synthesize one from the live payload.
+        synth = live.map_for_export()
+        self.assertEqual(len(synth["runs"]), 1)
+        self.assertEqual(synth["runs"][0]["walls"], [[875.0, 125.0]])
+        # And it re-imports cleanly through the same path.
+        self.assertTrue(dashboard.LiveDashboard().load_map(synth)["frames"])
+
     def test_apply_seed_primes_prior_coverage(self):
         payload = dashboard.empty_payload(territory_mm=1000)
         # Column 0 visited; a wall barrier in column 1 cuts off columns 2-3.

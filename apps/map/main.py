@@ -343,6 +343,10 @@ class DashboardPublisher:
     def seed(self, seed):
         self._post('/seed', seed)
 
+    def upload_map(self, data):
+        """Push the authoritative map JSON so the dashboard can export it."""
+        self._post('/map', data)
+
 
 def validate_policy_config(policy, parser):
     """Validate ordered command-policy configuration."""
@@ -2191,11 +2195,19 @@ def main(args=None):
             base_data=strategy_map if source_map_file != map_file else None,
             replace_existing=source_map_file is None,
         )
+    saved_map = json.loads(map_file.read_text())
+    # Hand the authoritative saved map to the dashboard so its Save-map export is
+    # the real run data (events, quality, territories), not a pose reconstruction.
+    if live_dashboard is not None:
+        try:
+            live_dashboard.upload_map(saved_map)
+        except Exception as exc:
+            print(f"\n  [dashboard warning] failed to upload map: {exc}")
     try:
         from apps.map.visualize_cells import render_cell_map
     except ModuleNotFoundError:
         from visualize_cells import render_cell_map
-    render_cell_map(json.loads(map_file.read_text()), img_path)
+    render_cell_map(saved_map, img_path)
 
 
 if __name__ == "__main__":

@@ -388,6 +388,17 @@ On a `resume` run, the mapper first POSTs the prior map's coverage and known
 blockers to the dashboard's `/seed` endpoint, so already-mapped visited,
 blocked, and unreachable cells show from the first pose rather than appearing
 empty until the robot re-explores.
+
+The dashboard can also import and export the map JSON itself:
+
+- **Save map** downloads the map as JSON (`GET /map.json`). After a run the
+  mapper uploads the authoritative saved map to the dashboard (`POST /map`), so
+  the download is the real run data — paths, events, quality, territories — not
+  a reconstruction from poses. (Before any upload it falls back to a minimal map
+  synthesized from the live path and observed blockers.)
+- **Import map** loads a map JSON file (`POST /map`) and renders it exactly like
+  the standalone animation, so you can replay or inspect a saved map in the live
+  UI. Importing reloads the page to pick up the map's territory size.
 - Draws the conservative-exploration territories and their 4×4 cell grids,
   labeling each cell's coordinate and coloring it by live state as the run
   progresses.

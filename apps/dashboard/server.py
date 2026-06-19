@@ -573,10 +573,41 @@ def export_payload(payload):
     return export
 
 
+def live_payload_to_map(payload):
+    """Synthesize a minimal single-run map from a live payload.
+
+    Used for export when no authoritative map has been uploaded/imported -- it
+    captures the path and observed blockers (and is round-trippable through
+    build_payload) but, unlike a real mapping-run file, has no per-leg events or
+    quality metadata.
+    """
+    seed = payload.get('seed_path', []) or []
+    frames = payload.get('frames', [])
+    path = (
+        [[p[0], p[1]] for p in seed]
+        + [[f['x'], f['y'], f['heading']] for f in frames]
+    )
+    return {
+        'schema_version': 2,
+        'runs': [{
+            'status': 'accepted',
+            'path': path,
+            'walls': [[w[0], w[1]] for w in payload.get('walls', [])],
+            'obstacles': [[o[0], o[1]] for o in payload.get('obstacles', [])],
+            'conservative_exploration': {
+                'territory_size_mm': payload.get('territory_mm', TERRITORY_MM),
+                'territories': payload.get('territories', []),
+                'focus_territory': payload.get('focus', [0, 0]),
+            },
+        }],
+    }
+
+
 class LiveDashboard:
     def __init__(self, title='Dash Live Map Dashboard', territory_mm=TERRITORY_MM):
         self.title = title
         self.payload = empty_payload(territory_mm)
+        self.map_data = None  # authoritative map JSON (uploaded or imported)
         self.lock = threading.Lock()
 
     def snapshot(self):
@@ -590,6 +621,29 @@ class LiveDashboard:
     def seed(self, seed):
         with self.lock:
             apply_seed(self.payload, seed)
+
+    def load_map(self, data):
+        """Replace the dashboard state with a full map JSON (import / finalize).
+
+        Renders the map exactly like the standalone animation (build_payload) and
+        keeps the raw data so it can be exported verbatim.
+        """
+        if not isinstance(data, dict):
+            raise ValueError('map must be a JSON object')
+        try:
+            payload = build_payload(data)
+        except SystemExit as exc:  # build_payload rejects maps with no runs
+            raise ValueError(str(exc))
+        with self.lock:
+            self.payload = payload
+            self.map_data = data
+        return payload
+
+    def map_for_export(self):
+        with self.lock:
+            if self.map_data is not None:
+                return self.map_data
+            return live_payload_to_map(self.payload)
 
     def static_html(self):
         return render_html(export_payload(self.snapshot()), self.title)
@@ -612,7 +666,13 @@ def dashboard_page(dashboard):
         '<button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>',
         '<button class="ghost" id="rotate" title="Rotate 90&deg; clockwise">&#10227;</button>\n'
         '    <a class="ghost" id="saveAnimation" href="/animation.html" '
-        'title="Save standalone animation">Save animation</a>',
+        'title="Save standalone animation">Save animation</a>\n'
+        '    <a class="ghost" id="saveMap" href="/map.json" '
+        'title="Download the map as JSON">Save map</a>\n'
+        '    <button class="ghost" id="importMap" '
+        'title="Load a map JSON into the dashboard">Import map</button>\n'
+        '    <input type="file" id="importMapFile" accept="application/json,.json" '
+        'style="display:none">',
     ).replace(
         '  .speed {',
         '  a.ghost { display: inline-flex; align-items: center; text-decoration: none; }\n'
@@ -659,6 +719,14 @@ def make_handler(dashboard):
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif parsed.path == '/map.json':
+                body = json.dumps(dashboard.map_for_export()).encode('utf-8')
+                self.send_response(HTTPStatus.OK)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Disposition', 'attachment; filename="dash_map.json"')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif parsed.path == '/move':
                 query = parse_qs(parsed.query)
                 self.send_json({
@@ -675,13 +743,17 @@ def make_handler(dashboard):
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path not in ('/move', '/moves', '/seed'):
+            if path not in ('/move', '/moves', '/seed', '/map'):
                 self.send_json({'error': 'not found'}, HTTPStatus.NOT_FOUND)
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 body = self.rfile.read(length).decode('utf-8')
                 data = json.loads(body) if body else {}
+                if path == '/map':
+                    payload = dashboard.load_map(data)
+                    self.send_json({'ok': True, 'frames': len(payload['frames'])})
+                    return
                 if path == '/seed':
                     dashboard.seed(data if isinstance(data, dict) else {})
                     self.send_json({'ok': True, 'seeded': True})
@@ -702,6 +774,7 @@ def serve_dashboard(host, port, title, territory_mm):
     )
     print(f'Dashboard listening on http://{host}:{port}')
     print('POST moves to /move as {"pose":[x,y,heading],"duration":0.5}')
+    print('Import/export the map JSON via POST /map and GET /map.json')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1585,6 +1658,36 @@ async function livePoll() {
   } catch (err) {
     headerSub.textContent = 'server unavailable';
   }
+}
+
+// ---- Import a map JSON -----------------------------------------------------
+// Posting to /map replaces the dashboard state with the full map render; reload
+// afterwards so the page re-reads the imported map's territory size and grid.
+const importBtn = document.getElementById('importMap');
+const importFile = document.getElementById('importMapFile');
+if (importBtn && importFile) {
+  importBtn.addEventListener('click', () => importFile.click());
+  importFile.addEventListener('change', async () => {
+    const file = importFile.files[0];
+    importFile.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const res = await fetch('/map', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: text,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert('Import failed: ' + (err.error || res.status));
+        return;
+      }
+      location.reload();
+    } catch (err) {
+      alert('Import failed: ' + err);
+    }
+  });
 }
 
 setInterval(livePoll, 500);
