@@ -1298,6 +1298,10 @@ class _ExplorationRun:
         self.command_policy = command_policy
         self.dashboard = dashboard
         self._dashboard_warned = False
+        # How many of self.walls / self.obstacles have been sent to the live
+        # dashboard, so each publish forwards only the newly observed ones.
+        self._published_walls = 0
+        self._published_obstacles = 0
 
         self.yaw_prev = send_command('get_yaw')['result']
         self.left_prev = send_command('get_left_wheel')['result']
@@ -1392,7 +1396,20 @@ class _ExplorationRun:
                 move['event'] = event
             if duration is not None:
                 move['duration'] = duration
+            # Forward any wall/obstacle observations recorded since the last
+            # publish so they show up on the live map. mark_ahead records these
+            # at leg end -- just after that leg's own pose publish -- so they
+            # ride out with the next pose (typically the turn after a wall hit);
+            # flush_dashboard_observations() catches any trailing ones at run end.
+            new_walls = self.walls[self._published_walls:]
+            new_obstacles = self.obstacles[self._published_obstacles:]
+            if new_walls:
+                move['walls'] = [list(point) for point in new_walls]
+            if new_obstacles:
+                move['obstacles'] = [list(point) for point in new_obstacles]
             self.dashboard.post_move(move)
+            self._published_walls = len(self.walls)
+            self._published_obstacles = len(self.obstacles)
         except Exception as exc:
             # Warn once: with the dashboard server down this would otherwise
             # fire on every pose. Mapping continues regardless.
@@ -1402,6 +1419,16 @@ class _ExplorationRun:
                     f"(is the dashboard server running?): {exc}"
                 )
                 self._dashboard_warned = True
+
+    def flush_dashboard_observations(self):
+        """Publish a trailing pose if walls/obstacles were recorded after the
+        last pose update (e.g. a wall hit on the final leg), so the live map
+        does not miss the run's last observations."""
+        if self.dashboard is None:
+            return
+        if (len(self.walls) > self._published_walls
+                or len(self.obstacles) > self._published_obstacles):
+            self.publish_dashboard_pose()
 
     def update_pose(self, action, requested):
         yaw_now = read_settled('get_yaw')
@@ -1927,6 +1954,7 @@ def explore(
     finally:
         run.stop_safely()
 
+    run.flush_dashboard_observations()
     print(
         f'\nDone. Path={len(run.path)} pts  '
         f'Walls={len(run.walls)}  Obstacles={len(run.obstacles)}'

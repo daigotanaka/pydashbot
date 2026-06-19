@@ -76,6 +76,60 @@ class MappingStrategyTests(unittest.TestCase):
             {"active": True, "host": "127.0.0.1", "port": 9000},
         )
 
+    def test_dashboard_publisher_normalizes_bind_all_host(self):
+        # 0.0.0.0 is a valid server bind address but not a connect target.
+        publisher = map_room.DashboardPublisher("0.0.0.0", 8000)
+        self.assertEqual(publisher.url, "http://127.0.0.1:8000/move")
+        publisher = map_room.DashboardPublisher("192.168.1.5", 8000)
+        self.assertEqual(publisher.url, "http://192.168.1.5:8000/move")
+
+    def test_publish_forwards_new_observations_only(self):
+        # A wall/obstacle is recorded at leg end, just after that leg's pose
+        # publish, so each publish must forward only the newly observed points
+        # (and a trailing flush must catch the final one).
+        import types
+
+        sent = []
+        run = types.SimpleNamespace(
+            dashboard=types.SimpleNamespace(post_move=sent.append),
+            _dashboard_warned=False,
+            x=0.0,
+            y=0.0,
+            heading=0.0,
+            walls=[],
+            obstacles=[],
+            _published_walls=0,
+            _published_obstacles=0,
+        )
+        run.publish_dashboard_pose = (
+            map_room._ExplorationRun.publish_dashboard_pose.__get__(run)
+        )
+        run.flush_dashboard_observations = (
+            map_room._ExplorationRun.flush_dashboard_observations.__get__(run)
+        )
+
+        run.publish_dashboard_pose()
+        self.assertNotIn("walls", sent[-1])
+
+        run.walls.append((10.0, 20.0))
+        run.publish_dashboard_pose()
+        self.assertEqual(sent[-1]["walls"], [[10.0, 20.0]])
+
+        # Already published -- not resent on the next pose.
+        run.publish_dashboard_pose()
+        self.assertNotIn("walls", sent[-1])
+
+        # A trailing observation with no following pose update is flushed.
+        before = len(sent)
+        run.obstacles.append((30.0, 40.0))
+        run.flush_dashboard_observations()
+        self.assertEqual(len(sent), before + 1)
+        self.assertEqual(sent[-1]["obstacles"], [[30.0, 40.0]])
+
+        # Nothing new -- flush is a no-op.
+        run.flush_dashboard_observations()
+        self.assertEqual(len(sent), before + 1)
+
     def test_mapping_config_rejects_unknown_exploration_policy(self):
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.yaml"
