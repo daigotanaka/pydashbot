@@ -2229,7 +2229,6 @@ def main(args=None):
             x0, y0 = DOCK_CLEARANCE_MM, DOCK_CLEARANCE_MM
         heading0 = 0.0
 
-    img_path = map_file.with_suffix('.png')
     # The live dashboard is a separate app (python -m apps.dashboard); when
     # enabled, publish poses to it over HTTP rather than hosting it in-process.
     live_dashboard = None
@@ -2288,11 +2287,6 @@ def main(args=None):
             live_dashboard.upload_map(saved_map)
         except Exception as exc:
             print(f"\n  [dashboard warning] failed to upload map: {exc}")
-    try:
-        from apps.map.visualize_cells import render_cell_map
-    except ModuleNotFoundError:
-        from visualize_cells import render_cell_map
-    render_cell_map(saved_map, img_path)
 
 
 if __name__ == "__main__":

@@ -1493,9 +1493,10 @@ const DASH_SVG =
   '<ellipse cx="27" cy="38" rx="9" ry="6" fill="#ffffff" opacity="0.32"/>' +
   '<circle cx="86" cy="46" r="24" fill="url(#body)" stroke="#063f5c" stroke-width="1.2"/>' +
   '<ellipse cx="79" cy="38" rx="9" ry="6" fill="#ffffff" opacity="0.32"/>' +
-  // orange caps on the outward-facing side of each front sphere
-  '<circle cx="20" cy="46" r="8.5" fill="url(#amber)" stroke="#9c4a08" stroke-width="0.8"/>' +
-  '<circle cx="100" cy="46" r="8.5" fill="url(#amber)" stroke="#9c4a08" stroke-width="0.8"/>' +
+  // orange caps on the outward-facing side of each front sphere, slightly
+  // foreshortened (taller than wide) to read as a top-down view
+  '<ellipse cx="20" cy="46" rx="6" ry="9" fill="url(#amber)" stroke="#9c4a08" stroke-width="0.8"/>' +
+  '<ellipse cx="100" cy="46" rx="6" ry="9" fill="url(#amber)" stroke="#9c4a08" stroke-width="0.8"/>' +
   // dark neck collar under the head
   '<circle cx="60" cy="56" r="22" fill="#10222e" opacity="0.92"/>' +
   // head dome (center, on top)

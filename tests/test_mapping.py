@@ -369,7 +369,6 @@ class MappingStrategyTests(unittest.TestCase):
                 patch.object(map_room.time, "sleep"),
                 patch.object(map_room, "dock_to_corner") as dock_to_corner,
                 patch.object(map_room, "explore", return_value=run) as explore,
-                patch("apps.map.visualize_cells.render_cell_map"),
             ):
                 map_room.main(["start", "--config", str(config)])
 

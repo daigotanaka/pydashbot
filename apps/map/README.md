@@ -10,11 +10,10 @@ every obstacle.
 
 ## Setup
 
-Install the project and the optional Matplotlib dependency used to render map
-images:
+Install the project:
 
 ```bash
-uv sync --extra tools
+uv sync
 ```
 
 Start the WebSocket server in a separate terminal and leave it running:
@@ -319,40 +318,11 @@ run and avoid go-home if this happens.
 
 ## Visualizing A Map
 
-Two tools render a saved map. Both read the JSON the mapper writes and need no
-hardware or running server.
-
-[`visualize_cells.py`](visualize_cells.py) renders a static PNG — a cell-grid
-overlay with each cell's visited / blocked / unreachable / frontier state, the
-robot path, and wall observations:
-
-```bash
-uv run --extra tools apps/map/visualize_cells.py data/room_map.json
-```
-
-It writes `<map>_cells.png` beside the map. Pass `--output FILE` to choose the
-path, or `--home-route` to overlay the route the current go-home planner would
-follow.
-
-[`animation.py`](animation.py) renders an interactive replay as a single,
-self-contained HTML file — all map data and rendering code are embedded, so it
-has no external dependencies and can be opened locally or published to the web
-as-is:
-
-```bash
-uv run --extra tools apps/map/animation.py data/room_map.json
-```
-
-It writes `<map>_animation.html` beside the map (override with `--output`,
-retitle with `--title`, or override the recorded territory size with
-`--territory-size`). The animation:
-
-- Replays the robot leg by leg as a top-view Dash avatar (the three-sphere
-  body, head dome, and orange eye), with a glowing path trail.
-
-The live dashboard is a **separate app** ([`apps/dashboard`](../dashboard)) that
-runs independently of the mapper. Start it first, then run a mapping session —
-the two communicate over HTTP, so the mapper never hosts the server in-process.
+The live dashboard ([`apps/dashboard`](../dashboard)) renders a map in the
+browser, live as the robot explores or replayed from a saved file. It is a
+**separate app** that runs independently of the mapper: start it first, then run
+a mapping session — the two communicate over HTTP, so the mapper never hosts the
+server in-process.
 
 Start the live dashboard (use a `--territory-size` matching the run's
 `territory_size_mm` so the cell grid lines up):
@@ -399,6 +369,8 @@ The dashboard can also import and export the map JSON itself:
 - **Import map** loads a map JSON file (`POST /map`) and renders it exactly like
   the standalone animation, so you can replay or inspect a saved map in the live
   UI. Importing reloads the page to pick up the map's territory size.
+- Replays the robot leg by leg as a top-view Dash avatar (three-sphere body,
+  head dome, and orange eye) with a glowing path trail.
 - Draws the conservative-exploration territories and their 4×4 cell grids,
   labeling each cell's coordinate and coloring it by live state as the run
   progresses.
@@ -957,9 +929,9 @@ Show all calibration options:
 uv run apps/map/calibrate.py --help
 ```
 
-Render a saved map (see [Visualizing A Map](#visualizing-a-map)):
+Visualize a map, live or from a saved file (see
+[Visualizing A Map](#visualizing-a-map)):
 
 ```bash
-uv run --extra tools apps/map/visualize_cells.py data/room_map.json
-uv run --extra tools apps/map/animation.py data/room_map.json
+uv run apps.dashboard --host 0.0.0.0 --port 8000 --territory-size 1000
 ```

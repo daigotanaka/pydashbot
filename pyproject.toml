@@ -28,11 +28,6 @@ dependencies = [
     "websockets>=13.0,<16.0",
 ]
 
-[project.optional-dependencies]
-tools = [
-    "matplotlib>=3.8",
-]
-
 [project.urls]
 Homepage = "https://github.com/daigotanaka/pydashbot"
 Repository = "https://github.com/daigotanaka/pydashbot"
