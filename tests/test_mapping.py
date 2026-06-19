@@ -875,6 +875,43 @@ class MappingStrategyTests(unittest.TestCase):
         )
         self.assertIsNone(issue)
 
+    def test_common_mode_slip_rejects_travel_faster_than_commanded(self):
+        # 667 mm logged in only 0.5 s implies ~1334 mm/s, far over the 200 mm/s
+        # command: the encoder over-read while blocked, so reject.
+        issue = map_room.blocked_common_mode_slip_issue(
+            "forward",
+            725,
+            667,
+            motion_outcome={
+                "halt": "obstacle",
+                "phase": "moving",
+                "elapsed_seconds": 0.5,
+                "speed_mmps": 200,
+            },
+        )
+        self.assertEqual(
+            issue,
+            "obstacle stop with wheel travel faster than commanded "
+            "(suspected common-mode slip)",
+        )
+
+    def test_common_mode_slip_accepts_near_full_travel_consistent_with_time(self):
+        # 667 mm over 3.34 s is exactly the commanded 200 mm/s -- the robot
+        # genuinely drove almost to the target before meeting the obstacle, so
+        # it is a normal wall stop and the pose is kept (no slip).
+        issue = map_room.blocked_common_mode_slip_issue(
+            "forward",
+            725,
+            667,
+            motion_outcome={
+                "halt": "obstacle",
+                "phase": "moving",
+                "elapsed_seconds": 3.34,
+                "speed_mmps": 200,
+            },
+        )
+        self.assertIsNone(issue)
+
     def test_common_mode_slip_legacy_fallback_rejects_short_blocked_probe(self):
         issue = map_room.blocked_common_mode_slip_issue(
             "forward",

@@ -133,7 +133,10 @@ class MotionController:
             )
             if detected:
                 await self._stop_for_obstacle(wall_stop_sound)
-                return self._obstacle_outcome("before_start", readings)
+                return self._obstacle_outcome(
+                    "before_start", readings,
+                    elapsed_seconds=0.0, speed_mmps=speed_mmps,
+                )
 
         baseline_pitch = self.get_pitch() if stop_at_obstacle else None
         last_proximity_time = self.get_dash_time() if stop_at_obstacle else None
@@ -156,6 +159,9 @@ class MotionController:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return {"halt": "completed", "monitored": True}
+            # Time spent moving so far; the obstacle halts below report it so the
+            # mapper can compare logged travel against the commanded speed.
+            elapsed = seconds - remaining
             await asyncio.sleep(min(PROXIMITY_POLL_INTERVAL, remaining))
 
             proximity_time = self.get_dash_time()
@@ -170,14 +176,20 @@ class MotionController:
                     )
                     if rear_proximity_streak >= rear_proximity_confirm_count:
                         await self._stop_for_obstacle(wall_stop_sound)
-                        return self._obstacle_outcome("moving", readings)
+                        return self._obstacle_outcome(
+                            "moving", readings,
+                            elapsed_seconds=elapsed, speed_mmps=speed_mmps,
+                        )
                 else:
                     proximity_streak = (
                         proximity_streak + 1 if obstacle_detected else 0
                     )
                     if proximity_streak >= proximity_confirm_count:
                         await self._stop_for_obstacle(wall_stop_sound)
-                        return self._obstacle_outcome("moving", readings)
+                        return self._obstacle_outcome(
+                            "moving", readings,
+                            elapsed_seconds=elapsed, speed_mmps=speed_mmps,
+                        )
 
             tilt_time = self.get_time()
             if tilt_time is None or tilt_time != last_tilt_time:
@@ -207,9 +219,21 @@ class MotionController:
             await self.say(wall_stop_sound)
 
     @staticmethod
-    def _obstacle_outcome(phase, readings):
-        """Build an obstacle halt outcome from the readings that triggered it."""
-        return {"halt": "obstacle", "phase": phase, **readings}
+    def _obstacle_outcome(phase, readings, elapsed_seconds=None, speed_mmps=None):
+        """Build an obstacle halt outcome from the readings that triggered it.
+
+        `elapsed_seconds` (time spent moving before the halt) and `speed_mmps`
+        (the effective commanded speed) let callers tell a genuine near-target
+        stop from a common-mode slip: the wheels can only log distance at the
+        commanded speed, so travel implying a much higher speed is an encoder
+        over-read while blocked.
+        """
+        outcome = {"halt": "obstacle", "phase": phase, **readings}
+        if elapsed_seconds is not None:
+            outcome["elapsed_seconds"] = round(elapsed_seconds, 3)
+        if speed_mmps is not None:
+            outcome["speed_mmps"] = speed_mmps
+        return outcome
 
     def _obstacle_in_path(
         self, distance_mm, proximity_threshold, rear_proximity_threshold

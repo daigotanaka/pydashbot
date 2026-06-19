@@ -104,6 +104,12 @@ ODOMETRY_SLIP_HEADING_DEG = 45
 COMMON_MODE_SLIP_MIN_DISTANCE_MM = 150
 COMMON_MODE_SLIP_FULL_REQUEST_RATIO = 0.9
 COMMON_MODE_SLIP_LEGACY_MAX_REQUEST_MM = 500
+# When the firmware reports how long a blocked leg actually drove, the wheels
+# can only have logged distance at the commanded speed. Measured travel implying
+# a speed this many times the command means the encoder over-read while the
+# robot was blocked (a real common-mode slip); travel consistent with the
+# elapsed time is just a genuine obstacle met near the leg's end -- not a slip.
+COMMON_MODE_SLIP_OVERREAD_SPEED_RATIO = 1.5
 # Loop closure must be a small drift nudge against a genuinely co-located wall,
 # not a teleport toward a different wall. A wide match radius binds an
 # observation to the wrong wall and a large max correction then jumps the pose
@@ -466,16 +472,34 @@ def blocked_common_mode_slip_issue(
         return None
 
     requested = abs(requested)
-    halt = (motion_outcome or {}).get('halt')
-    phase = (motion_outcome or {}).get('phase')
+    outcome = motion_outcome or {}
+    halt = outcome.get('halt')
+    phase = outcome.get('phase')
     if halt == 'obstacle' and phase == 'before_start':
         return 'front obstacle before start but wheels measured forward travel'
-    if (
-        halt == 'obstacle'
-        and phase == 'moving'
-        and abs(distance_mm) >= requested * COMMON_MODE_SLIP_FULL_REQUEST_RATIO
-    ):
-        return 'front obstacle stop with near-full wheel travel (suspected common-mode slip)'
+    if halt == 'obstacle' and phase == 'moving':
+        elapsed = outcome.get('elapsed_seconds')
+        speed = outcome.get('speed_mmps')
+        if elapsed and speed:
+            # Trustworthy timing: the wheels can only log distance at the
+            # commanded speed, so travel implying a much higher speed is an
+            # encoder over-read while blocked -- a real slip. Travel consistent
+            # with the elapsed time means the robot genuinely drove (almost) to
+            # the target before meeting the obstacle, which is a normal wall
+            # stop, so keep the pose.
+            implied_speed = abs(distance_mm) / elapsed
+            if implied_speed > speed * COMMON_MODE_SLIP_OVERREAD_SPEED_RATIO:
+                return (
+                    'obstacle stop with wheel travel faster than commanded '
+                    '(suspected common-mode slip)'
+                )
+            return None
+        # No timing recorded (older firmware/data): fall back to the coarse
+        # near-full-travel heuristic, which cannot tell a genuine near-target
+        # stop from a slip.
+        if abs(distance_mm) >= requested * COMMON_MODE_SLIP_FULL_REQUEST_RATIO:
+            return 'front obstacle stop with near-full wheel travel (suspected common-mode slip)'
+        return None
 
     # Older map files did not record the move() outcome. Keep a narrow fallback
     # for the original failure mode: a short boundary-limited probe that ends
