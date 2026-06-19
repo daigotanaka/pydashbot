@@ -83,52 +83,58 @@ class MappingStrategyTests(unittest.TestCase):
         publisher = map_room.DashboardPublisher("192.168.1.5", 8000)
         self.assertEqual(publisher.url, "http://192.168.1.5:8000/move")
 
-    def test_publish_forwards_new_observations_only(self):
-        # A wall/obstacle is recorded at leg end, just after that leg's pose
-        # publish, so each publish must forward only the newly observed points
-        # (and a trailing flush must catch the final one).
+    def _dashboard_run(self):
         import types
 
-        sent = []
-        run = types.SimpleNamespace(
-            dashboard=types.SimpleNamespace(post_move=sent.append),
-            _dashboard_warned=False,
-            x=0.0,
-            y=0.0,
-            heading=0.0,
-            walls=[],
-            obstacles=[],
-            _published_walls=0,
-            _published_obstacles=0,
+        run = object.__new__(map_room._ExplorationRun)
+        run.posts, run.amends = [], []
+        run.dashboard = types.SimpleNamespace(
+            post_move=run.posts.append, amend_move=run.amends.append
         )
-        run.publish_dashboard_pose = (
-            map_room._ExplorationRun.publish_dashboard_pose.__get__(run)
-        )
-        run.flush_dashboard_observations = (
-            map_room._ExplorationRun.flush_dashboard_observations.__get__(run)
-        )
+        run._dashboard_warned = False
+        run._dashboard_pending = False
+        run.x = run.y = run.heading = 0.0
+        run.walls, run.obstacles = [], []
+        run._published_walls = run._published_obstacles = 0
+        run.events = []
+        return run
 
-        run.publish_dashboard_pose()
-        self.assertNotIn("walls", sent[-1])
+    def test_predict_posts_leg_target_before_moving(self):
+        run = self._dashboard_run()
+        # Forward 100 mm at heading 0 -> predicted end is +100 in x.
+        run.predict_dashboard_pose("forward", 100)
+        self.assertEqual(len(run.posts), 1)
+        self.assertAlmostEqual(run.posts[-1]["pose"][0], 100.0, places=3)
+        self.assertAlmostEqual(run.posts[-1]["duration"], 0.5, places=3)  # 100/200
+        self.assertTrue(run._dashboard_pending)
+        # A turn predicts the new heading, not a translation.
+        run.predict_dashboard_pose("turn", 30)
+        self.assertEqual(run.posts[-1]["pose"][:2], [0.0, 0.0])
+        self.assertAlmostEqual(run.posts[-1]["pose"][2], map_room.normalize_heading(-30))
 
-        run.walls.append((10.0, 20.0))
-        run.publish_dashboard_pose()
-        self.assertEqual(sent[-1]["walls"], [[10.0, 20.0]])
+    def test_amend_sends_measured_pose_and_new_observations(self):
+        run = self._dashboard_run()
+        run.predict_dashboard_pose("forward", 750)
 
-        # Already published -- not resent on the next pose.
-        run.publish_dashboard_pose()
-        self.assertNotIn("walls", sent[-1])
+        # Robot stopped short at x=500 and observed a wall; amend reconciles it.
+        run.x = 500.0
+        run.events.append({"action": "forward", "distance_mm": 500})
+        run.walls.append((625.0, 0.0))
+        run.amend_dashboard_pose()
+        self.assertEqual(len(run.amends), 1)
+        self.assertEqual(run.amends[-1]["pose"][0], 500.0)
+        self.assertEqual(run.amends[-1]["walls"], [[625.0, 0.0]])
+        self.assertFalse(run._dashboard_pending)
 
-        # A trailing observation with no following pose update is flushed.
-        before = len(sent)
-        run.obstacles.append((30.0, 40.0))
+        # No pending leg -> amend is a no-op (no double-send).
+        run.amend_dashboard_pose()
+        self.assertEqual(len(run.amends), 1)
+
+        # A trailing observation after the last leg is flushed via amend.
+        run.obstacles.append((10.0, 10.0))
         run.flush_dashboard_observations()
-        self.assertEqual(len(sent), before + 1)
-        self.assertEqual(sent[-1]["obstacles"], [[30.0, 40.0]])
-
-        # Nothing new -- flush is a no-op.
-        run.flush_dashboard_observations()
-        self.assertEqual(len(sent), before + 1)
+        self.assertEqual(len(run.amends), 2)
+        self.assertEqual(run.amends[-1]["obstacles"], [[10.0, 10.0]])
 
     def test_mapping_config_rejects_unknown_exploration_policy(self):
         with TemporaryDirectory() as directory:

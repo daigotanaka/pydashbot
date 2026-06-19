@@ -78,6 +78,10 @@ SENSOR_SAFE_SPEED_MMPS = 200
 MIN_FORWARD_DISTANCE_MM = 200
 BACK_AWAY_MM        = 200
 BACK_AWAY_SPEED_MMPS = 100
+# Turn timing, mirrored from dash/core/motion.py, for estimating how long a leg
+# will take when predicting its end pose for the live dashboard.
+TURN_SPEED_DPS    = 85.9
+TURN_SETTLE_SECONDS = 0.05
 POLL_INTERVAL     = 0.05
 PITCH_TILT_THRESHOLD = 40
 DURATION          = 60
@@ -328,24 +332,28 @@ class DashboardPublisher:
         self.url = f'{self.base_url}/move'
         self.timeout = timeout
 
-    def _post(self, endpoint, payload):
+    def _request(self, method, endpoint, payload):
         request = urllib.request.Request(
             f'{self.base_url}{endpoint}',
             data=json.dumps(payload).encode('utf-8'),
             headers={'Content-Type': 'application/json'},
-            method='POST',
+            method=method,
         )
         urllib.request.urlopen(request, timeout=self.timeout).close()
 
     def post_move(self, move):
-        self._post('/move', move)
+        self._request('POST', '/move', move)
+
+    def amend_move(self, move):
+        """Amend the last posted frame with the robot's measured pose."""
+        self._request('PUT', '/move', move)
 
     def seed(self, seed):
-        self._post('/seed', seed)
+        self._request('POST', '/seed', seed)
 
     def upload_map(self, data):
         """Push the authoritative map JSON so the dashboard can export it."""
-        self._post('/map', data)
+        self._request('POST', '/map', data)
 
 
 def validate_policy_config(policy, parser):
@@ -1337,6 +1345,8 @@ class _ExplorationRun:
         # dashboard, so each publish forwards only the newly observed ones.
         self._published_walls = 0
         self._published_obstacles = 0
+        # True between a predicted-leg POST and its measured-pose PUT amend.
+        self._dashboard_pending = False
 
         self.yaw_prev = send_command('get_yaw')['result']
         self.left_prev = send_command('get_left_wheel')['result']
@@ -1420,7 +1430,7 @@ class _ExplorationRun:
         # blocked / unreachable cells show from the first pose.
         self.seed_dashboard()
         self.known_path.append((self.x, self.y))
-        self.publish_dashboard_pose(duration=0.0)
+        self.post_dashboard_pose((self.x, self.y, self.heading), 0.0)
 
     # -- pose tracking -----------------------------------------------------
     def seed_dashboard(self):
@@ -1449,51 +1459,112 @@ class _ExplorationRun:
                 )
                 self._dashboard_warned = True
 
-    def publish_dashboard_pose(self, event=None, duration=None):
+    def _warn_dashboard(self, exc):
+        # Warn once: with the dashboard server down this would otherwise fire on
+        # every leg. Mapping continues regardless.
+        if not self._dashboard_warned:
+            print(
+                f"\n  [dashboard warning] failed to reach dashboard "
+                f"(is the server running?): {exc}"
+            )
+            self._dashboard_warned = True
+
+    def post_dashboard_pose(self, pose, duration):
+        """POST a new dashboard frame (the run's first pose, or a predicted leg
+        target). For a prediction the animation starts from here while the robot
+        is still moving; amend_dashboard_pose() reconciles it afterwards."""
         if self.dashboard is None:
             return
         try:
-            move = {
-                'pose': [self.x, self.y, self.heading],
+            self.dashboard.post_move({
+                'pose': [pose[0], pose[1], pose[2]],
                 'timestamp': datetime.now().isoformat(timespec='seconds'),
-            }
-            if event is not None:
-                move['event'] = event
-            if duration is not None:
-                move['duration'] = duration
-            # Forward any wall/obstacle observations recorded since the last
-            # publish so they show up on the live map. mark_ahead records these
-            # at leg end -- just after that leg's own pose publish -- so they
-            # ride out with the next pose (typically the turn after a wall hit);
-            # flush_dashboard_observations() catches any trailing ones at run end.
-            new_walls = self.walls[self._published_walls:]
-            new_obstacles = self.obstacles[self._published_obstacles:]
-            if new_walls:
-                move['walls'] = [list(point) for point in new_walls]
-            if new_obstacles:
-                move['obstacles'] = [list(point) for point in new_obstacles]
-            self.dashboard.post_move(move)
-            self._published_walls = len(self.walls)
-            self._published_obstacles = len(self.obstacles)
+                'duration': duration,
+            })
         except Exception as exc:
-            # Warn once: with the dashboard server down this would otherwise
-            # fire on every pose. Mapping continues regardless.
-            if not self._dashboard_warned:
-                print(
-                    f"\n  [dashboard warning] failed to publish pose "
-                    f"(is the dashboard server running?): {exc}"
-                )
-                self._dashboard_warned = True
+            self._warn_dashboard(exc)
+
+    def predict_dashboard_pose(self, action, requested):
+        """Before commanding the robot, POST where the leg is expected to end so
+        the live map animates it in parallel with the real motion."""
+        if self.dashboard is None:
+            return
+        self._dashboard_pending = True
+        self.post_dashboard_pose(
+            self._predicted_pose(action, requested),
+            self._predicted_seconds(action, requested),
+        )
+
+    def amend_dashboard_pose(self):
+        """After a leg, PUT the measured pose (and any walls/obstacles observed)
+        onto the predicted frame so the dashboard converges on what the robot
+        actually did -- e.g. stopping short of a wall or under-rotating a turn."""
+        if self.dashboard is None or not self._dashboard_pending:
+            return
+        self._dashboard_pending = False
+        self._amend_dashboard(self.events[-1] if self.events else None)
 
     def flush_dashboard_observations(self):
-        """Publish a trailing pose if walls/obstacles were recorded after the
-        last pose update (e.g. a wall hit on the final leg), so the live map
-        does not miss the run's last observations."""
+        """Amend the last frame with any walls/obstacles recorded after the
+        final leg's amend (e.g. a wall hit on the last leg), so the live map
+        keeps the run's last observations."""
         if self.dashboard is None:
             return
         if (len(self.walls) > self._published_walls
                 or len(self.obstacles) > self._published_obstacles):
-            self.publish_dashboard_pose()
+            self._amend_dashboard(None)
+
+    def _amend_dashboard(self, event):
+        move = {
+            'pose': [self.x, self.y, self.heading],
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+        }
+        seconds = self._leg_seconds(event)
+        if seconds is not None:
+            move['duration'] = round(seconds, 3)
+        new_walls = self.walls[self._published_walls:]
+        new_obstacles = self.obstacles[self._published_obstacles:]
+        if new_walls:
+            move['walls'] = [list(point) for point in new_walls]
+        if new_obstacles:
+            move['obstacles'] = [list(point) for point in new_obstacles]
+        try:
+            self.dashboard.amend_move(move)
+            self._published_walls = len(self.walls)
+            self._published_obstacles = len(self.obstacles)
+        except Exception as exc:
+            self._warn_dashboard(exc)
+
+    def _predicted_pose(self, action, requested):
+        if action == 'turn':
+            return (self.x, self.y, normalize_heading(self.heading - requested))
+        distance = -abs(requested) if action == 'reverse' else abs(requested)
+        hr = math.radians(self.heading)
+        return (
+            self.x + distance * math.cos(hr),
+            self.y + distance * math.sin(hr),
+            self.heading,
+        )
+
+    @staticmethod
+    def _predicted_seconds(action, requested):
+        if action == 'turn':
+            return abs(requested) / TURN_SPEED_DPS + TURN_SETTLE_SECONDS
+        speed = BACK_AWAY_SPEED_MMPS if action == 'reverse' else SENSOR_SAFE_SPEED_MMPS
+        return abs(requested) / max(speed, 1)
+
+    @staticmethod
+    def _leg_seconds(event):
+        if not event:
+            return None
+        if event.get('action') == 'turn':
+            degrees = abs(event.get('requested') or event.get('heading_delta') or 0.0)
+            return degrees / TURN_SPEED_DPS + TURN_SETTLE_SECONDS
+        distance = event.get('distance_mm')
+        if distance is None:
+            distance = event.get('requested') or 0.0
+        speed = SENSOR_SAFE_SPEED_MMPS if distance >= 0 else BACK_AWAY_SPEED_MMPS
+        return abs(distance) / max(speed, 1)
 
     def update_pose(self, action, requested):
         yaw_now = read_settled('get_yaw')
@@ -1557,7 +1628,6 @@ class _ExplorationRun:
             )
             self.quality['accepted_updates'] += 1
             self.policy.report_progress()
-            self.publish_dashboard_pose(event)
         self.events.append(event)
         if not event['accepted']:
             return None
@@ -1585,8 +1655,11 @@ class _ExplorationRun:
             # Negate the map-frame angle to a physical turn command (see
             # update_pose); update_pose records the physical step for odometry.
             physical_step = -step
+            self.predict_dashboard_pose('turn', physical_step)
             send_command('turn', physical_step)
-            if self.update_pose('turn', physical_step) is None:
+            outcome = self.update_pose('turn', physical_step)
+            self.amend_dashboard_pose()
+            if outcome is None:
                 break
 
     def redirect(self, reason, sounds=None, back_away=False, left=0, right=0):
@@ -1596,8 +1669,10 @@ class _ExplorationRun:
         if sounds:
             send_command('say', random.choice(sounds))
         if back_away:
+            self.predict_dashboard_pose('reverse', BACK_AWAY_MM)
             send_command('move', -BACK_AWAY_MM, BACK_AWAY_SPEED_MMPS)
             self.update_pose('reverse', BACK_AWAY_MM)
+            self.amend_dashboard_pose()
         self.turn_toward_knowledge(reason, left, right, require_turn=True)
         send_command('say', random.choice(RESUME_SOUNDS))
         send_command('neck_color', '#00ff00')
@@ -1835,13 +1910,17 @@ class _ExplorationRun:
                     # Preset angles are map-frame; negate to a physical turn
                     # command (see update_pose).
                     physical_step = -step
+                    self.predict_dashboard_pose('turn', physical_step)
                     send_command('turn', physical_step)
-                    if self.update_pose('turn', physical_step) is None:
+                    outcome = self.update_pose('turn', physical_step)
+                    self.amend_dashboard_pose()
+                    if outcome is None:
                         break
                 if self.quality['tracking_lost']:
                     break
                 self.policy_commands_completed = index
                 continue
+            self.predict_dashboard_pose('forward', value)
             response = send_command(
                 'move',
                 value,
@@ -1862,6 +1941,7 @@ class _ExplorationRun:
                         'motion_response': response,
                     }
                 )
+                self.amend_dashboard_pose()
                 print(f"\n  [preset halted] {issue}")
                 break
             previous_position = (self.x, self.y)
@@ -1869,6 +1949,7 @@ class _ExplorationRun:
             traveled = self.update_pose('forward', value)
             self.events[-1]['motion_outcome'] = response['result']
             if traveled is None:
+                self.amend_dashboard_pose()
                 break
             left, right, tilt, reason, _, back_away = self.handle_leg_end(
                 traveled,
@@ -1879,6 +1960,7 @@ class _ExplorationRun:
                 motion_outcome=response['result'],
             )
             self.report_leg(0.0, traveled, left, right, tilt)
+            self.amend_dashboard_pose()
             if back_away:
                 print(f"\n  [preset halted] {reason}")
                 break
@@ -1907,6 +1989,7 @@ class _ExplorationRun:
                     continue
                 self.redirect('exploration boundary')
                 continue
+            self.predict_dashboard_pose('forward', requested_distance)
             response = send_command(
                 'move',
                 requested_distance,
@@ -1925,6 +2008,7 @@ class _ExplorationRun:
                 reason, sounds, back_away = 'odometry rejected', None, False
                 traveled = 0.0
                 self.report_leg(remaining, traveled, left, right, tilt)
+                self.amend_dashboard_pose()
                 break
             else:
                 left, right, tilt, reason, sounds, back_away = self.handle_leg_end(
@@ -1936,6 +2020,7 @@ class _ExplorationRun:
                     motion_outcome=response['result'],
                 )
             self.report_leg(remaining, traveled, left, right, tilt)
+            self.amend_dashboard_pose()
 
             if (
                 time.time() < end_time

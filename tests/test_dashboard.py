@@ -75,6 +75,28 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(visited_first, 1)
         self.assertGreater(visited_last, visited_first)
 
+    def test_amend_last_move_corrects_pose_and_adds_walls(self):
+        payload = dashboard.empty_payload(territory_mm=1000)
+        dashboard.apply_live_move(payload, {"pose": [125, 125, 0]})
+        # Predicted leg target far ahead.
+        dashboard.apply_live_move(payload, {"pose": [875, 125, 0], "duration": 3.0})
+        self.assertEqual(len(payload["frames"]), 2)
+
+        # Robot actually stopped short at a wall; amend the last frame in place.
+        frame = dashboard.amend_last_move(
+            payload,
+            {"pose": [375, 125, 0], "duration": 2.0, "walls": [[625, 125]]},
+        )
+        self.assertEqual(len(payload["frames"]), 2)  # amended, not appended
+        self.assertEqual(frame["x"], 375.0)
+        self.assertEqual(payload["path"][-1], [375.0, 125.0])
+        self.assertEqual(payload["durations"][-1], 2.0)
+        self.assertEqual(payload["walls"], [[625.0, 125.0, 1]])
+        # The amended frame re-resolves: robot cell visited, wall cell blocked.
+        cells = payload["frames"][-1]["cells"]["0,0"]
+        self.assertEqual(cells["1,0"], "visited")
+        self.assertEqual(cells["2,0"], "blocked")
+
     def test_load_map_renders_and_exports_verbatim(self):
         live = dashboard.LiveDashboard(territory_mm=1000)
         map_data = {

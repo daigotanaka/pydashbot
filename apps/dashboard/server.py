@@ -476,6 +476,42 @@ def apply_live_move(payload, move):
     return frame
 
 
+def amend_last_move(payload, move):
+    """Amend the most recent frame in place (PUT /move).
+
+    The mapper POSTs each leg's predicted target before driving, then PUTs the
+    robot's measured pose here once the leg ends -- so the live map converges on
+    what actually happened (e.g. a leg that stopped short of a wall, or a turn
+    that under-rotated). Walls/obstacles observed on the leg are appended at this
+    frame's index, then cells are re-resolved.
+    """
+    if not payload['frames']:
+        return apply_live_move(payload, move)
+    frame = payload['frames'][-1]
+    pose = move.get('pose')
+    if pose is None:
+        pose = [move.get('x'), move.get('y'), move.get('heading')]
+    if pose and pose[0] is not None:
+        frame['x'] = round(float(pose[0]), 2)
+    if pose and len(pose) > 1 and pose[1] is not None:
+        frame['y'] = round(float(pose[1]), 2)
+    if pose and len(pose) > 2 and pose[2] is not None:
+        frame['heading'] = round(float(pose[2]), 2)
+    if payload['path']:
+        payload['path'][-1] = [frame['x'], frame['y']]
+    if move.get('duration') is not None and payload['durations']:
+        payload['durations'][-1] = round(float(move['duration']), 3)
+    index = len(payload['frames']) - 1
+    for name in ('walls', 'obstacles'):
+        for point in move.get(name, []):
+            payload[name].append(
+                [round(float(point[0]), 2), round(float(point[1]), 2), index]
+            )
+    recompute_wall_segments(payload)
+    resolve_live_cells(payload)
+    return frame
+
+
 def apply_seed(payload, seed):
     """Prime a live payload with prior-run knowledge for a resume.
 
@@ -617,6 +653,10 @@ class LiveDashboard:
     def post_move(self, move):
         with self.lock:
             return apply_live_move(self.payload, move)
+
+    def amend_move(self, move):
+        with self.lock:
+            return amend_last_move(self.payload, move)
 
     def seed(self, seed):
         with self.lock:
@@ -771,6 +811,20 @@ def make_handler(dashboard):
                 self.send_json({'error': str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
             self.send_json({'ok': True, 'frames': frames})
+
+        def do_PUT(self):
+            if urlparse(self.path).path != '/move':
+                self.send_json({'error': 'not found'}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                body = self.rfile.read(length).decode('utf-8')
+                data = json.loads(body) if body else {}
+                frame = dashboard.amend_move(data if isinstance(data, dict) else {})
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                self.send_json({'error': str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({'ok': True, 'frame': frame})
 
     return DashboardHandler
 
@@ -1720,7 +1774,9 @@ if (importBtn && importFile) {
   });
 }
 
-setInterval(livePoll, 500);
+// Poll fast enough that a predicted leg and its measured-pose amend are picked
+// up close to when the robot actually moves (live-sync, see the mapper).
+setInterval(livePoll, 200);
 livePoll();
 </script>"""
 
