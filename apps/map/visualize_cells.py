@@ -9,23 +9,23 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 
 try:
-    from examples.mapping.conservative_exploration import (
+    from apps.map.policies.conservative_exploration import (
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
         territory_resolution,
     )
-    from examples.mapping.exploration_walls import inferred_wall_segments
-    from examples.mapping.map_room import plan_home_route
+    from apps.map.exploration_walls import inferred_wall_segments
+    from apps.map.main import plan_home_route
 except ModuleNotFoundError:
-    from conservative_exploration import (
+    from policies.conservative_exploration import (
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
         territory_resolution,
     )
     from exploration_walls import inferred_wall_segments
-    from map_room import plan_home_route
+    from main import plan_home_route
 
 
 COLORS = ['#4477cc', '#44aa77', '#cc7744', '#aa44aa', '#cc4444']

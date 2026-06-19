@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from dash.robot import discover_and_connect
+from dash.core.robot import discover_and_connect
 
 
 class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -11,10 +11,10 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         robot = SimpleNamespace(connect=AsyncMock())
 
         with patch(
-            "dash.robot.BleakScanner.discover",
+            "dash.core.robot.BleakScanner.discover",
             new=AsyncMock(return_value=[device]),
         ):
-            with patch("dash.robot.DashRobot", return_value=robot):
+            with patch("dash.core.robot.DashRobot", return_value=robot):
                 result = await discover_and_connect(retry_attempts=1, retry_delay=0)
 
         self.assertIs(result, robot)
@@ -24,10 +24,10 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         robot = SimpleNamespace(connect=AsyncMock())
 
         with patch(
-            "dash.robot.BleakScanner.discover",
+            "dash.core.robot.BleakScanner.discover",
             new=AsyncMock(return_value=[device]),
         ) as discover:
-            with patch("dash.robot.DashRobot", return_value=robot) as robot_class:
+            with patch("dash.core.robot.DashRobot", return_value=robot) as robot_class:
                 result = await discover_and_connect(
                     retry_attempts=1,
                     retry_delay=0,
@@ -43,10 +43,10 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         robot = SimpleNamespace(connect=AsyncMock())
 
         with patch(
-            "dash.robot.BleakScanner.discover",
+            "dash.core.robot.BleakScanner.discover",
             new=AsyncMock(),
         ) as discover:
-            with patch("dash.robot.DashRobot", return_value=robot) as robot_class:
+            with patch("dash.core.robot.DashRobot", return_value=robot) as robot_class:
                 result = await discover_and_connect(
                     retry_attempts=1,
                     retry_delay=0,

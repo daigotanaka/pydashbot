@@ -3,8 +3,8 @@ import unittest
 from itertools import count
 from unittest.mock import AsyncMock, patch
 
-from dash.actuators import compensate_turn
-from dash.robot import DashRobot
+from dash.core.actuators import compensate_turn
+from dash.core.robot import DashRobot
 
 
 def decode_turn_centiradians(packet):
@@ -24,7 +24,7 @@ class TurnTests(unittest.IsolatedAsyncioTestCase):
         return robot
 
     async def test_turns_encode_the_direction_compensated_angle_and_duration(self):
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()) as sleep:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()) as sleep:
             robot = self.make_robot()
             await robot.turn(90)
             left_packet = robot.command.await_args.args[1]
@@ -52,20 +52,20 @@ class TurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(right_packet[6], 0xC0)
 
     async def test_turn_reports_executed_when_gyro_and_wheels_move(self):
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
             robot = self.make_robot(yaw=(0, 300), left=(0, 90), right=(0, -90))
             outcome = await robot.turn(21)
         self.assertEqual(outcome["halt"], "executed")
         self.assertEqual(outcome["yaw_delta"], 300)
 
     async def test_turn_reports_stall_when_wheels_do_not_move(self):
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
             robot = self.make_robot(yaw=(0, 1), left=(0, 2), right=(0, -1))
             outcome = await robot.turn(21)
         self.assertEqual(outcome["halt"], "stalled")
 
     async def test_turn_reports_no_yaw_response_when_only_wheels_move(self):
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
             robot = self.make_robot(yaw=(0, 2), left=(0, 90), right=(0, -90))
             outcome = await robot.turn(21)
         self.assertEqual(outcome["halt"], "no_yaw_response")
@@ -108,7 +108,7 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
     async def test_move_reports_completed_when_path_stays_clear(self):
         robot = self.make_robot()
 
-        with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
             get_loop.return_value.time.side_effect = [0, 2]
             outcome = await robot.move(200)
 
@@ -117,8 +117,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
     async def test_backward_move_checks_rear_sensor(self):
         robot = self.make_robot(left=255, right=255, rear=0)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 2]
                 await robot.move(-200)
 
@@ -128,8 +128,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
     async def test_backward_move_stops_for_rear_wall(self):
         robot = self.make_robot(rear=20)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 0.01, 0.02, 0.03]
                 await robot.move(-200)
 
@@ -140,8 +140,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
     async def test_backward_move_ignores_rear_sensor_idle_noise(self):
         robot = self.make_robot(rear=12)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 2]
                 await robot.move(-200)
 
@@ -153,8 +153,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         readings = iter([0, 20, 0, 20, 20, 20])
         robot.get_prox_rear = lambda: next(readings)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [
                     0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06
                 ]
@@ -168,8 +168,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         sensor_times = iter([0, 1, 1, 1])
         robot.get_dash_time = lambda: next(sensor_times)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 0.01, 0.02, 2]
                 await robot.move(-200)
 
@@ -179,8 +179,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
     async def test_backward_move_uses_slower_sensor_safe_speed(self):
         robot = self.make_robot(rear=0)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 2]
                 await robot.move(-200, speed_mmps=1000)
 
@@ -193,8 +193,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         readings = iter([0, 15, 15, 15])
         robot.get_prox_left = lambda: next(readings)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 0.01, 0.02, 0.03]
                 await robot.move(200)
 
@@ -207,8 +207,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         readings = iter([0, 15, 0])
         robot.get_prox_left = lambda: next(readings)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 0.01, 1]
                 await robot.move(200)
 
@@ -218,7 +218,7 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
     async def test_obstacle_stop_can_be_disabled(self):
         robot = self.make_robot(left=255, right=255)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()) as sleep:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()) as sleep:
             await robot.move(200, stop_at_obstacle=False)
 
         robot.command.assert_awaited_once()
@@ -229,8 +229,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
     async def test_obstacle_aware_move_caps_speed_for_sensor_response_time(self):
         robot = self.make_robot()
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 1]
                 await robot.move(200, speed_mmps=1000)
 
@@ -251,8 +251,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         pitches = iter([0, 50, 50])
         robot.get_pitch = lambda: next(pitches)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 0.01, 0.02]
                 await robot.move(200, tilt_confirm_count=2)
 
@@ -264,8 +264,8 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         pitches = iter([0, 50, 0])
         robot.get_pitch = lambda: next(pitches)
 
-        with patch("dash.motion.asyncio.sleep", new=AsyncMock()):
-            with patch("dash.motion.asyncio.get_running_loop") as get_loop:
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
                 get_loop.return_value.time.side_effect = [0, 0.01, 1]
                 await robot.move(200, tilt_confirm_count=2)
 

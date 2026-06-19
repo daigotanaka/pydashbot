@@ -6,8 +6,8 @@ import unittest
 
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-from dash.ws_client import build_uri, parse_args as parse_client_args
-from dash.ws_server import (
+from dash.remote.client import build_uri, parse_args as parse_client_args
+from dash.remote.server import (
     center_head,
     execute_request,
     greet_robot,
@@ -124,6 +124,13 @@ class WebSocketArgumentTests(unittest.TestCase):
     def test_server_silent_defaults_off_and_accepts_flag(self):
         self.assertFalse(parse_server_args([]).silent)
         self.assertTrue(parse_server_args(["--silent"]).silent)
+
+    def test_server_accepts_public_silent_start_flags(self):
+        args = parse_server_args(["--silent", "--host", "0.0.0.0", "--port", "8765"])
+
+        self.assertTrue(args.silent)
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.port, 8765)
 
 
 class SilentModeTests(unittest.IsolatedAsyncioTestCase):
@@ -270,7 +277,7 @@ class WebSocketClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_client_round_trip(self):
         try:
             from websockets.asyncio.server import serve
-            from dash.ws_client import send_command_async
+            from dash.remote.client import send_command_async
         except ImportError:
             self.skipTest("websockets is not installed")
 

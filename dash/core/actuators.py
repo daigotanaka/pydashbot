@@ -6,7 +6,7 @@ from enum import IntEnum
 
 from colour import Color
 
-from dash.constants import NOISES
+from dash.core.constants import NOISES
 
 
 # Dash loses a roughly constant angle at the start of every turn while the

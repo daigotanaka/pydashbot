@@ -6,7 +6,7 @@ import json
 
 from websockets.asyncio.client import connect
 
-from dash.command_protocol import create_request, parse_cli_values
+from dash.core.command_protocol import create_request, parse_cli_values
 
 HOST = "127.0.0.1"
 PORT = 8765

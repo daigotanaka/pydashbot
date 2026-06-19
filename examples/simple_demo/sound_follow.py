@@ -1,7 +1,7 @@
 """React to a loud sound: turn head toward it, say 'huh?', then drive forward.
 
 Requires the robot WebSocket server to be running:
-    uv run python -m dash.ws_server
+    uv run python -m dash.remote.server
 
 Then run this script:
     uv run python examples/simple_demo/sound_follow.py
@@ -10,7 +10,7 @@ Then run this script:
 import argparse
 import asyncio
 
-from dash.ws_client import URI, build_uri, send_command_async
+from dash.remote.client import URI, build_uri, send_command_async
 
 # Mic level (0-255) that counts as a "loud enough" sound event.
 MIC_THRESHOLD = 40

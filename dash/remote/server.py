@@ -12,9 +12,9 @@ import time
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-from dash.command_protocol import execute_json
-from dash.interactive import discover_and_connect_sync
-from dash.robot import DEFAULT_ROBOT_NAME
+from dash.core.command_protocol import execute_json
+from dash.control.interactive import discover_and_connect_sync
+from dash.core.robot import DEFAULT_ROBOT_NAME
 
 HOST = "127.0.0.1"
 PORT = 8765

@@ -25,7 +25,7 @@ expansion) and changes two things:
 import math
 
 try:
-    from examples.mapping.conservative_exploration import (
+    from apps.map.policies.conservative_exploration import (
         ConservativeExploration,
         FRONTIER_HEADING_WEIGHT,
         MIN_USEFUL_FORWARD_MM,
@@ -42,12 +42,12 @@ try:
         territory_coverage,
         territory_resolution,
     )
-    from examples.mapping.exploration_walls import (
+    from apps.map.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
     )
 except ModuleNotFoundError:
-    from conservative_exploration import (
+    from policies.conservative_exploration import (
         ConservativeExploration,
         FRONTIER_HEADING_WEIGHT,
         MIN_USEFUL_FORWARD_MM,

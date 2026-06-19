@@ -5,11 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from examples.mapping import calibrate
-from examples.mapping import conservative_exploration as conservative
-from examples.mapping import exploration_policies
-from examples.mapping import map_room
-from examples.mapping.exploration_policy import NoveltyExplorationPolicy
+from apps.map import calibrate
+from apps.map.policies import conservative_exploration as conservative
+from apps.map.policies import exploration_policies
+from apps.map import main as map_room
+from apps.map.policies.exploration_policy import NoveltyExplorationPolicy
 
 FIXTURES = Path(__file__).parent / "data"
 
@@ -80,6 +80,15 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(options.exploration_policy, "coverage")
         self.assertEqual(options.territory_size, 1500)
         self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
+
+    def test_mapping_config_option_can_precede_mode(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "mapping.yaml"
+            config.write_text('{"map_file": "data/room_map.json"}')
+            options = map_room.parse_args(["--config", str(config), "start"])
+
+        self.assertEqual(options.mode, "start")
+        self.assertEqual(options.map_file, "data/room_map.json")
 
     def test_mapping_config_preserves_policy_priority_order(self):
         with TemporaryDirectory() as directory:

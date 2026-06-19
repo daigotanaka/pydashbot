@@ -2,16 +2,16 @@ import asyncio
 from bleak import BleakClient, BleakScanner
 import binascii
 import logging
-from dash.constants import COMMANDS, COMMAND1_CHAR_UUID
-from dash.sensors import RobotSensors
+from dash.core.constants import COMMANDS, COMMAND1_CHAR_UUID
+from dash.core.sensors import RobotSensors
 from collections import defaultdict
-from dash.actuators import (
+from dash.core.actuators import (
     CommonActuators,
     DashActuators,
     PoseDirection,
     PoseMode,
 )
-from dash.motion import MotionController
+from dash.core.motion import MotionController
 
 DEFAULT_ROBOT_NAME = "Doodle"
 

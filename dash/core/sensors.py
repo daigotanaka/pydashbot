@@ -5,7 +5,7 @@ from bleak import BleakClient
 from collections import defaultdict
 
 
-from dash.constants import CHARACTERISTICS
+from dash.core.constants import CHARACTERISTICS
 
 
 def _to_int(value, bits):

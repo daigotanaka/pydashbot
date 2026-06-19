@@ -2,7 +2,7 @@
 
 import argparse
 import asyncio
-from dash.robot import DEFAULT_ROBOT_NAME, DashRobot, discover_and_connect
+from dash.core.robot import DEFAULT_ROBOT_NAME, DashRobot, discover_and_connect
 
 
 def parse_args(args=None):

@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import threading
 
-from dash.robot import DEFAULT_ROBOT_NAME, discover_and_connect
+from dash.core.robot import DEFAULT_ROBOT_NAME, discover_and_connect
 
 
 class InteractiveRobot:

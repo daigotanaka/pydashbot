@@ -20,7 +20,7 @@ uv sync --extra tools
 Start the WebSocket server in a separate terminal and leave it running:
 
 ```bash
-uv run pydashbot-server
+uv run dash.remote.server
 ```
 
 Only one process can maintain the Bluetooth connection to Dash. The calibration
@@ -69,7 +69,7 @@ move 250, turn 90, move 250, turn 90, move 250
 With ideal motion and the current dock pose, it visits `(0,0)` cells `(1,1)`,
 `(2,1)`, `(2,2)`, and ends in `(1,2)`. Course angles are in the map frame
 (positive turns head into the room toward +y). Recompute this if `x0`/`y0` in
-`dock_to_corner` (`examples/mapping/map_room.py`) or `territory_size_mm`
+`dock_to_corner` (`apps/map/main.py`) or `territory_size_mm`
 changes.
 
 The first move sets `stop_at_obstacle: false` because it intentionally departs
@@ -82,9 +82,9 @@ disabled.
 Choose one positional run mode:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py start
-uv run --extra tools examples/mapping/map_room.py resume
-uv run --extra tools examples/mapping/map_room.py dock
+uv run apps.map start
+uv run apps.map resume
+uv run apps.map dock
 ```
 
 - `start`: dock at the starting corner. If `map_file` exists, reuse and extend
@@ -100,7 +100,7 @@ Place Dash in open space with at least 300 mm of clear floor ahead and enough
 room to turn. Run:
 
 ```bash
-uv run examples/mapping/calibrate.py --output data/calibration.json
+uv run apps/map/calibrate.py --output data/calibration.json
 ```
 
 The calibrator:
@@ -146,7 +146,7 @@ Unlike the wall-search distance, the result is *not* a clearance offset from
 each wall: Dash ends up snug against both, body against the corner. The
 starting pose is fixed at Dash's measured rotation-axis offset from that
 corner — `(310, 310)` for the current physical robot (180-190 mm wide; see
-`DOCK_CLEARANCE_MM`/`x0`/`y0` in `dock_to_corner`, `examples/mapping/map_room.py`).
+`DOCK_CLEARANCE_MM`/`x0`/`y0` in `dock_to_corner`, `apps/map/main.py`).
 Re-measure and update those constants if the robot's body or sensor mounting
 changes.
 
@@ -158,7 +158,7 @@ rear wall at `x=0` (for `y ≥ 0`); the space behind them (negative `x` or `y`)
 is never explorable, and the mapper records those walls so it does not try to
 expand past them. Fresh maps therefore start at approximately `(310, 310)` in
 territory `(0,0)`. This frame mirrors the gyro's handedness (see `update_pose`
-in `examples/mapping/map_room.py`), so the physical motion is unchanged while
+in `apps/map/main.py`), so the physical motion is unchanged while
 map-frame turn angles are negated to physical turn commands. Existing maps
 retain their saved start pose and (older) coordinate frame — do not append
 new-frame runs to a map created before this change; start a fresh map instead.
@@ -166,7 +166,7 @@ new-frame runs to a map created before this change; start a fresh map instead.
 It then explores until the requested duration ends:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py start
+uv run apps.map start
 ```
 
 By default the mapper explores with the conservative-territory policy (see
@@ -196,7 +196,7 @@ After a fresh exploration, do not manually move the robot. Return it to the
 map's initial position and orientation with:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py dock
+uv run apps.map dock
 ```
 
 Go-home plans along previously traversed path segments. It does not invent
@@ -256,7 +256,7 @@ To physically start again from the original corner, creating or extending the
 configured map:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py start
+uv run apps.map start
 ```
 
 When the configured map exists, the mapper performs the corner-docking routine,
@@ -266,25 +266,25 @@ not exist, the mapper creates a fresh map.
 To continue from the robot's final physical pose without docking:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py resume
+uv run apps.map resume
 ```
 
 ## Recommended Explore-And-Return Session
 
 1. Start the WebSocket server.
 2. Set `map_file`, `calibration`, and `duration_seconds` in
-   `examples/mapping/config/config.yaml`.
+   `apps/map/config/config.yaml`.
 3. Place Dash at the starting corner and run:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py start
+uv run apps.map start
 ```
 
 4. Confirm Dash has not been manually moved.
 5. Return home:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py dock
+uv run apps.map dock
 ```
 
 ## Map Data And Quality
@@ -325,7 +325,7 @@ overlay with each cell's visited / blocked / unreachable / frontier state, the
 robot path, and wall observations:
 
 ```bash
-uv run --extra tools examples/mapping/visualize_cells.py data/room_map.json
+uv run --extra tools apps/map/visualize_cells.py data/room_map.json
 ```
 
 It writes `<map>_cells.png` beside the map. Pass `--output FILE` to choose the
@@ -338,7 +338,7 @@ has no external dependencies and can be opened locally or published to the web
 as-is:
 
 ```bash
-uv run --extra tools examples/mapping/animation.py data/room_map.json
+uv run --extra tools apps/map/animation.py data/room_map.json
 ```
 
 It writes `<map>_animation.html` beside the map (override with `--output`,
@@ -395,7 +395,7 @@ produce a false "no unblocked route home." The default D* Lite strategy fixes
 this by applying localized directional costs instead of hard exclusions.
 
 Relevant code: `HardBlockedEdgeStrategy` and `DStarLiteStrategy` in
-`examples/mapping/go_home_strategies.py`.
+`apps/map/strategies/go_home_strategies.py`.
 
 ## Conservative Exploration
 
@@ -461,7 +461,7 @@ progress persists across `start` runs, and expansion favors nearby
 uncharted territory so the explored region grows compactly.
 
 This feature is experimental and isolated in
-`examples/mapping/conservative_exploration.py`. Set
+`apps/map/policies/conservative_exploration.py`. Set
 `exploration_policy: novelty` to disable it.
 
 The core explorer interacts with the policy only through optional hooks for
@@ -585,7 +585,7 @@ territories only where the robot actually reaches a boundary keeps the unlocked
 set equal to what has been physically visited or directly attempted.
 
 Relevant code: `heading_score` / `choose_exploration_angle` in
-`examples/mapping/map_room.py`; `exploration_policy.py`;
+`apps/map/main.py`; `exploration_policy.py`;
 `conservative_exploration.py`; `coverage_exploration.py`.
 
 ## Next Challenges
@@ -611,7 +611,7 @@ leg, the same way it explores unknown space, even though the map already
 records exactly how it got there the first time.
 
 This is a different mechanism from go-home's `DStarLiteStrategy`
-(`examples/mapping/go_home_strategies.py`), which builds a graph from path
+(`apps/map/strategies/go_home_strategies.py`), which builds a graph from path
 segments already driven, links nearby/collinear segments, and plans a route
 through that graph — explicitly preferring known-clear corridors and
 replanning around recorded blockages. Go-home has this; frontier-seeking
@@ -655,10 +655,10 @@ This is flagged as two pieces of work, not one:
    goal that is not "home" — needs design before implementation.
 
 Relevant code: `DStarLiteStrategy`, `HardBlockedEdgeStrategy`, `plan_route` in
-`examples/mapping/go_home_strategies.py`; `go_home`, `go_home_with_retries` in
-`examples/mapping/map_room.py`; `CoverageExploration.heading_preference`,
+`apps/map/strategies/go_home_strategies.py`; `go_home`, `go_home_with_retries` in
+`apps/map/main.py`; `CoverageExploration.heading_preference`,
 `_aim_toward_expansion`, `_select_territory_expansion` in
-`examples/mapping/coverage_exploration.py`.
+`apps/map/policies/coverage_exploration.py`.
 
 ### Local Detour Exploration
 
@@ -698,7 +698,7 @@ Safety constraints:
 
 Relevant code: `go_home` (the move loop, `needs_wall_clearance`,
 `obstacle_arrival_near_home`) and `describe_halt` in
-`examples/mapping/map_room.py`; `move()`, `_obstacle_in_path`, and the
+`apps/map/main.py`; `move()`, `_obstacle_in_path`, and the
 `PROXIMITY_*` constants in `dash/motion.py`; mapped walls in each run's `walls`
 list in the room-map JSON.
 
@@ -814,7 +814,7 @@ Safety and correctness constraints:
 
 Relevant code: `validate_odometry` (and the `TRACK_WIDTH_MM` /
 `ODOMETRY_SLIP_HEADING_DEG` constants) and `update_pose` in
-`examples/mapping/map_room.py`; the `get_left_wheel`, `get_right_wheel`,
+`apps/map/main.py`; the `get_left_wheel`, `get_right_wheel`,
 `get_yaw`, `get_pitch`, and `get_acceleration` sensors in `dash/sensors.py`.
 
 ### Corridor-Clearance Check Does Not Model Wall Orientation
@@ -841,15 +841,15 @@ rectangle (`MIN_CORRIDOR_OPENING_MM` wide, leg-length long) and checking for
 intersection, rather than measuring undirected point-to-segment distance.
 
 Relevant code: `territory_resolution` and `MIN_CORRIDOR_OPENING_MM` /
-`CORRIDOR_HALF_CLEARANCE_MM` in `examples/mapping/conservative_exploration.py`;
-`segment_crosses_wall` in `examples/mapping/exploration_walls.py`; regression
+`CORRIDOR_HALF_CLEARANCE_MM` in `apps/map/policies/conservative_exploration.py`;
+`segment_crosses_wall` in `apps/map/exploration_walls.py`; regression
 tests in `tests/test_conservative_exploration.py`.
 
 ### Verifying Wall Detections Against Transient Tilt
 
 When a forward leg stops early with elevated proximity readings, the mapper
 records it as a wall (`mark_ahead`/`handle_leg_end` in
-`examples/mapping/map_room.py`). Investigating a run where several such wall
+`apps/map/main.py`). Investigating a run where several such wall
 points seemed implausible (`data/room_map.json`, no physical wall at the
 recorded location) showed:
 
@@ -874,7 +874,7 @@ some lower bump-detection threshold even if it never crossed
 `PITCH_TILT_THRESHOLD`).
 
 Relevant code: `handle_leg_end`, `mark_ahead`, `report_leg`, and
-`PITCH_TILT_THRESHOLD` in `examples/mapping/map_room.py`; `get_pitch` in
+`PITCH_TILT_THRESHOLD` in `apps/map/main.py`; `get_pitch` in
 `dash/sensors.py`.
 
 ## Command Reference
@@ -882,32 +882,32 @@ Relevant code: `handle_leg_end`, `mark_ahead`, `report_leg`, and
 Run from the mapping config:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py start
-uv run --extra tools examples/mapping/map_room.py resume
-uv run --extra tools examples/mapping/map_room.py dock
+uv run apps.map start
+uv run apps.map resume
+uv run apps.map dock
 ```
 
 Use a different config:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py start --config path/to/config.yaml
+uv run apps.map --config path/to/config.yaml start
 ```
 
 Show mapper usage:
 
 ```bash
-uv run --extra tools examples/mapping/map_room.py --help
+uv run apps.map --help
 ```
 
 Show all calibration options:
 
 ```bash
-uv run examples/mapping/calibrate.py --help
+uv run apps/map/calibrate.py --help
 ```
 
 Render a saved map (see [Visualizing A Map](#visualizing-a-map)):
 
 ```bash
-uv run --extra tools examples/mapping/visualize_cells.py data/room_map.json
-uv run --extra tools examples/mapping/animation.py data/room_map.json
+uv run --extra tools apps/map/visualize_cells.py data/room_map.json
+uv run --extra tools apps/map/animation.py data/room_map.json
 ```

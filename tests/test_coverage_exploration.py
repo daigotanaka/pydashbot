@@ -1,9 +1,9 @@
 import math
 import unittest
 
-from examples.mapping import conservative_exploration as conservative
-from examples.mapping.coverage_exploration import STALL_LEGS, CoverageExploration
-from examples.mapping.exploration_policy import ExplorationPolicy
+from apps.map.policies import conservative_exploration as conservative
+from apps.map.policies.coverage_exploration import STALL_LEGS, CoverageExploration
+from apps.map.policies.exploration_policy import ExplorationPolicy
 
 FULLY_EXPLORED_SOUTH = [
     (x, y)

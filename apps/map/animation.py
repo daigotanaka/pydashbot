@@ -15,15 +15,15 @@ import json
 from pathlib import Path
 
 try:
-    from examples.mapping.conservative_exploration import (
+    from apps.map.policies.conservative_exploration import (
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
         territory_resolution,
     )
-    from examples.mapping.exploration_walls import inferred_wall_segments
+    from apps.map.exploration_walls import inferred_wall_segments
 except ModuleNotFoundError:
-    from conservative_exploration import (
+    from policies.conservative_exploration import (
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,

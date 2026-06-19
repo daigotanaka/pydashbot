@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from dash.actuators import (
+from dash.core.actuators import (
     MAX_TURN_CENTIRADIANS,
     TURN_DEADBAND_DEG_CCW,
     TURN_DEADBAND_DEG_CW,

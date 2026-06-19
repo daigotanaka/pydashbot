@@ -3,7 +3,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from dash.interactive import discover_and_connect_sync
+from dash.control.interactive import discover_and_connect_sync
 
 
 class FakeRobot:
@@ -30,7 +30,7 @@ class InteractiveRobotTest(unittest.TestCase):
         async def fake_discover(**kwargs):
             return fake_robot
 
-        with patch("dash.interactive.discover_and_connect", fake_discover):
+        with patch("dash.control.interactive.discover_and_connect", fake_discover):
             robot = discover_and_connect_sync(retry_attempts=1, retry_delay=0)
             self.assertEqual(robot.address, "test-address")
             self.assertEqual(robot.move(100, 100), "moved")
@@ -47,7 +47,7 @@ class InteractiveRobotTest(unittest.TestCase):
         async def fake_discover(**kwargs):
             return None
 
-        with patch("dash.interactive.discover_and_connect", fake_discover):
+        with patch("dash.control.interactive.discover_and_connect", fake_discover):
             robot = discover_and_connect_sync(retry_attempts=1, retry_delay=0)
 
         self.assertIsNone(robot)
@@ -59,7 +59,7 @@ class InteractiveRobotTest(unittest.TestCase):
             received.update(kwargs)
             return None
 
-        with patch("dash.interactive.discover_and_connect", fake_discover):
+        with patch("dash.control.interactive.discover_and_connect", fake_discover):
             discover_and_connect_sync(
                 retry_attempts=1,
                 retry_delay=0,

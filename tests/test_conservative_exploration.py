@@ -1,8 +1,8 @@
 import unittest
 
-from examples.mapping import conservative_exploration as conservative
-from examples.mapping import exploration_walls
-from examples.mapping import map_room
+from apps.map.policies import conservative_exploration as conservative
+from apps.map import exploration_walls
+from apps.map import main as map_room
 
 
 class ConservativeExplorationTests(unittest.TestCase):

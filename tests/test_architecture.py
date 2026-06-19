@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from dash.actuators import CommonActuators, DashActuators
-from dash.command_protocol import create_request, execute_json, execute_request
+from dash.core.actuators import CommonActuators, DashActuators
+from dash.core.command_protocol import create_request, execute_json, execute_request
 
 ROOT = Path(__file__).parents[1]
 
@@ -25,22 +25,24 @@ def imported_dash_modules(path):
 
 class LayerBoundaryTests(unittest.TestCase):
     def test_low_level_actuators_do_not_import_higher_layers(self):
-        modules = imported_dash_modules(ROOT / "dash" / "actuators.py")
+        modules = imported_dash_modules(ROOT / "dash" / "core" / "actuators.py")
 
-        self.assertEqual(modules, {"dash.constants"})
+        self.assertEqual(modules, {"dash.core.constants"})
 
     def test_motion_depends_only_on_low_level_actuators(self):
-        modules = imported_dash_modules(ROOT / "dash" / "motion.py")
+        modules = imported_dash_modules(ROOT / "dash" / "core" / "motion.py")
 
-        self.assertEqual(modules, {"dash.actuators"})
+        self.assertEqual(modules, {"dash.core.actuators"})
 
     def test_sensors_depend_only_on_low_level_constants(self):
-        modules = imported_dash_modules(ROOT / "dash" / "sensors.py")
+        modules = imported_dash_modules(ROOT / "dash" / "core" / "sensors.py")
 
-        self.assertEqual(modules, {"dash.constants"})
+        self.assertEqual(modules, {"dash.core.constants"})
 
     def test_command_protocol_does_not_depend_on_robot_layers(self):
-        modules = imported_dash_modules(ROOT / "dash" / "command_protocol.py")
+        modules = imported_dash_modules(
+            ROOT / "dash" / "core" / "command_protocol.py"
+        )
 
         self.assertEqual(modules, set())
 

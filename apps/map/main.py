@@ -20,45 +20,45 @@ from pathlib import Path
 
 import yaml
 
-from dash.ws_client import send_command
+from dash.remote.client import send_command
 try:
-    from examples.mapping.conservative_exploration import (
+    from apps.map.policies.conservative_exploration import (
         ConservativeExploration,
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
         territory_cell,
     )
-    from examples.mapping.coverage_exploration import CoverageExploration
-    from examples.mapping.exploration_policy import NoveltyExplorationPolicy
-    from examples.mapping.exploration_walls import (
+    from apps.map.policies.coverage_exploration import CoverageExploration
+    from apps.map.policies.exploration_policy import NoveltyExplorationPolicy
+    from apps.map.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
     )
-    from examples.mapping.exploration_policies import load_exploration_policy
-    from examples.mapping.go_home_strategies import (
+    from apps.map.policies.exploration_policies import load_exploration_policy
+    from apps.map.strategies.go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
         edge_is_blocked,
     )
 except ModuleNotFoundError:
-    from conservative_exploration import (
+    from policies.conservative_exploration import (
         ConservativeExploration,
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
         territory_cell,
     )
-    from coverage_exploration import CoverageExploration
-    from exploration_policy import NoveltyExplorationPolicy
+    from policies.coverage_exploration import CoverageExploration
+    from policies.exploration_policy import NoveltyExplorationPolicy
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
     )
-    from exploration_policies import load_exploration_policy
-    from go_home_strategies import (
+    from policies.exploration_policies import load_exploration_policy
+    from strategies.go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
         edge_is_blocked,
@@ -603,7 +603,7 @@ def latest_calibration_file(directory=Path('.')):
     if not files:
         raise FileNotFoundError(
             f"No {CAL_FILE_PATTERN} file found. "
-            "Run uv run examples/mapping/calibrate.py first."
+            "Run uv run apps/map/calibrate.py first."
         )
     return files[-1]
 
@@ -1970,7 +1970,7 @@ def main(args=None):
             replace_existing=source_map_file is None,
         )
     try:
-        from examples.mapping.visualize_cells import render_cell_map
+        from apps.map.visualize_cells import render_cell_map
     except ModuleNotFoundError:
         from visualize_cells import render_cell_map
     render_cell_map(json.loads(map_file.read_text()), img_path)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Calibrate yaw and wheel-distance scales through the WebSocket server.
 
-Start ``uv run pydashbot-server`` first and place the robot in open space.
+Start ``uv run dash.remote.server`` first and place the robot in open space.
 """
 
 import argparse
@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from dash.ws_client import send_command
+from dash.remote.client import send_command
 
 CAL_DISTANCE_MM = 300
 
@@ -130,7 +130,7 @@ def main(args=None):
     cal_file.parent.mkdir(parents=True, exist_ok=True)
     cal_file.write_text(json.dumps(cal, indent=2))
     print(f"\nCalibration saved -> {cal_file}")
-    print("\nRun uv run --extra tools examples/mapping/map_room.py to start mapping.")
+    print("\nRun uv run apps.map start to start mapping.")
 
 
 if __name__ == "__main__":

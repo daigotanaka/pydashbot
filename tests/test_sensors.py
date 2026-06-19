@@ -1,7 +1,7 @@
 import unittest
 from collections import defaultdict
 
-from dash.sensors import RobotSensors
+from dash.core.sensors import RobotSensors
 
 
 class SensorDecodeTests(unittest.TestCase):

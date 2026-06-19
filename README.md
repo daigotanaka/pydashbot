@@ -70,7 +70,7 @@ The synchronous API is the simplest way to control Dash from a script or
 interactive Python session:
 
 ```python
-from dash.interactive import discover_and_connect_sync
+from dash.control.interactive import discover_and_connect_sync
 
 robot = discover_and_connect_sync()  # Discovers the default name "Doodle"
 if robot is None:
@@ -90,7 +90,7 @@ For an asynchronous application:
 ```python
 import asyncio
 
-from dash.robot import discover_and_connect
+from dash.core.robot import discover_and_connect
 
 
 async def main():
@@ -214,7 +214,7 @@ robot.say("confused8")
 To list all known sound names:
 
 ```python
-from dash.constants import NOISES
+from dash.core.constants import NOISES
 
 print(*NOISES, sep="\n")
 ```
@@ -260,25 +260,25 @@ and accepts commands from other terminals or computers.
 Start it with the default address, `127.0.0.1:8765`:
 
 ```bash
-uv run pydashbot-server
+uv run dash.remote.server
 ```
 
 Choose another host or port:
 
 ```bash
-uv run pydashbot-server --host 192.168.1.10 --port 9000
+uv run dash.remote.server --host 192.168.1.10 --port 9000
 ```
 
 Discover a robot with another Bluetooth name:
 
 ```bash
-uv run pydashbot-server --name "Workshop Dash"
+uv run dash.remote.server --name "Workshop Dash"
 ```
 
 Connect directly without scanning:
 
 ```bash
-uv run pydashbot-server --address AA:BB:CC:DD:EE:FF
+uv run dash.remote.server --address AA:BB:CC:DD:EE:FF
 ```
 
 `--name` and `--address` are mutually exclusive. The default name is `Doodle`.
@@ -287,7 +287,7 @@ Suppress all robot sounds for the whole session, including ones requested by
 clients and internal safety sounds:
 
 ```bash
-uv run pydashbot-server --silent
+uv run dash.remote.server --silent
 ```
 
 Dash says `hi` after the server connects to it and `bye` when the server shuts
@@ -347,8 +347,8 @@ dash/
   motion.py            Bounded motion and obstacle/tilt safety
 
   command_protocol.py  Command parsing and dispatch
-  ws_server.py         WebSocket server
-  ws_client.py         WebSocket client
+  server.py         WebSocket server
+  client.py         WebSocket client
 
   interactive.py       Synchronous facade over the async API
   constants.py         Bluetooth UUIDs, sounds, and protocol constants
@@ -374,7 +374,7 @@ uv run examples/hardware_demo.py --name "Workshop Dash"
 uv run examples/sensor_monitor.py --address AA:BB:CC:DD:EE:FF
 ```
 
-The [room-mapping examples](examples/mapping/README.md) cover calibration,
+The [room-mapping examples](apps/map/README.md) cover calibration,
 autonomous exploration, map-guided exploration, and returning to the starting
 pose.
 

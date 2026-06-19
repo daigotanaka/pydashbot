@@ -3,7 +3,7 @@
 import asyncio
 import logging
 
-from dash.actuators import compensate_turn, encode_move
+from dash.core.actuators import compensate_turn, encode_move
 
 PROXIMITY_STOP_THRESHOLD = 15
 PROXIMITY_CONFIRM_COUNT = 3

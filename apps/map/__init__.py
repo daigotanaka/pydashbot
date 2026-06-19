@@ -1,0 +1,2 @@
+"""Room mapping application."""
+
