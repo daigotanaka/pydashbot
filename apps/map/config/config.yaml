@@ -20,5 +20,12 @@ territory_size_mm: 1000
 # Available go-home strategies:
 # - d-star-lite
 # - hard-blocked-edge
-# go_home_strategy: d-star-lite
-go_home_strategy: hard-blocked-edge
+docking:
+  # false to skip the initial dock positioning sequence
+  init: false
+  go-home-strategy: hard-blocked-edge
+
+dashboard:
+  active: true
+  host: 0.0.0.0
+  port: 8000

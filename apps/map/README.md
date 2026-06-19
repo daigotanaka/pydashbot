@@ -40,13 +40,14 @@ territory_size_mm: 1000
 policy:
   - name: preset
     input_file: data/course.json
-go_home_strategy: d-star-lite
+docking:
+  init: true
+  go-home-strategy: d-star-lite
 ```
 
-`exploration_policy` selects the heading policy by name (like
-`go_home_strategy`): `conservative` (bounded territories, frontier-alignment
-objective; the default), `coverage` (bounded territories, maximize
-newly-visited cells per leg — see
+`exploration_policy` selects the heading policy by name: `conservative`
+(bounded territories, frontier-alignment objective; the default), `coverage`
+(bounded territories, maximize newly-visited cells per leg — see
 [The coverage objective](#step-5-done-the-coverage-objective--coverageexploration)),
 or `novelty` (no territory limit, head toward unexplored space). The separate
 `policy:` list below is the *command* (preset course) policy and overrides
@@ -129,8 +130,9 @@ For a consistent map origin, place Dash near a room corner:
 4. Ensure the head tip and proximity sensors are unobstructed.
 5. Clear nearby cables, small objects, stairs, and drop-offs.
 
-The mapper uses this fixed docking sequence to establish the starting pose and
-orientation:
+By default, the mapper uses this fixed docking sequence to establish the
+starting pose and orientation. Set `docking.init: false` after manually placing
+Dash at the already-established starting pose to skip it.
 
 1. Reverse, seeking the rear wall, up to 500 mm. If the rear proximity sensor
    never crosses its threshold within that distance, the mapper warns (prints
@@ -212,8 +214,8 @@ edges that approach the actual stop position from the same direction. The edge
 remains available as a last resort, avoiding false "no route home" failures
 caused by deleting broad overlapping corridors.
 
-Set `go_home_strategy` to `hard-blocked-edge` in the config to use the previous
-hard-exclusion strategy for A/B testing.
+Set `docking.go-home-strategy` to `hard-blocked-edge` in the config to use the
+previous hard-exclusion strategy for A/B testing.
 
 A single `dock` invocation replans automatically: if an attempt aborts on a
 blockage while keeping a trustworthy pose, it records the failed approach and
@@ -259,9 +261,9 @@ configured map:
 uv run apps.map start
 ```
 
-When the configured map exists, the mapper performs the corner-docking routine,
-anchors itself to the saved starting pose, and appends a new run. When it does
-not exist, the mapper creates a fresh map.
+When the configured map exists, the mapper performs the corner-docking routine
+unless `docking.init` is false, anchors itself to the saved starting pose, and
+appends a new run. When it does not exist, the mapper creates a fresh map.
 
 To continue from the robot's final physical pose without docking:
 
@@ -347,6 +349,25 @@ retitle with `--title`, or override the recorded territory size with
 
 - Replays the robot leg by leg as a top-view Dash avatar (the three-sphere
   body, head dome, and orange eye), with a glowing path trail.
+
+`dashboard.py` serves the live dashboard.
+
+Start the live dashboard:
+
+```bash
+uv run --extra tools apps/map/dashboard.py --host 0.0.0.0 --port 8000
+```
+
+Post live poses to it:
+
+```bash
+curl -X POST http://127.0.0.1:8000/move \
+  -H 'Content-Type: application/json' \
+  -d '{"pose":[100,200,90],"duration":0.5}'
+```
+
+The browser animates each posted pose as it arrives. Use the dashboard's Save
+animation button to download a standalone HTML replay of the live session.
 - Draws the conservative-exploration territories and their 4×4 cell grids,
   labeling each cell's coordinate and coloring it by live state as the run
   progresses.

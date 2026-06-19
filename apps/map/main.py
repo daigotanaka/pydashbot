@@ -153,7 +153,7 @@ GO_HOME_STRATEGIES = {
     ACTIVE_GO_HOME_STRATEGY.name: ACTIVE_GO_HOME_STRATEGY,
     LEGACY_GO_HOME_STRATEGY.name: LEGACY_GO_HOME_STRATEGY,
 }
-# Heading policy selected by name in the config (like go_home_strategy).
+# Heading policy selected by name in the config.
 # `novelty` is the unconstrained default base; `conservative` and `coverage`
 # are bounded-territory policies (subclasses of ConservativeExploration).
 EXPLORATION_POLICIES = {
@@ -168,8 +168,18 @@ MAPPING_CONFIG_KEYS = {
     'duration_seconds',
     'exploration_policy',
     'territory_size_mm',
-    'go_home_strategy',
+    'docking',
     'policy',
+    'dashboard',
+}
+DEFAULT_DOCKING_CONFIG = {
+    'init': True,
+    'go-home-strategy': ACTIVE_GO_HOME_STRATEGY.name,
+}
+DEFAULT_DASHBOARD_CONFIG = {
+    'active': False,
+    'host': '0.0.0.0',
+    'port': 8000,
 }
 DEFAULT_MAPPING_CONFIG = Path(__file__).with_name('config') / 'config.yaml'
 
@@ -225,10 +235,12 @@ def apply_mapping_config(options, config, parser):
     options.calibration = config.get('calibration')
     options.duration = config.get('duration_seconds', DURATION)
     options.territory_size = config.get('territory_size_mm', TERRITORY_MM)
-    options.go_home_strategy = config.get(
-        'go_home_strategy', ACTIVE_GO_HOME_STRATEGY.name
-    )
+    options.docking = validate_docking_config(config.get('docking', {}), parser)
+    options.go_home_strategy = options.docking['go-home-strategy']
     options.policy = validate_policy_config(config.get('policy', []), parser)
+    options.dashboard = validate_dashboard_config(
+        config.get('dashboard', {}), parser
+    )
 
     options.exploration_policy = config.get(
         'exploration_policy', DEFAULT_EXPLORATION_POLICY
@@ -239,16 +251,55 @@ def apply_mapping_config(options, config, parser):
         options.territory_size = positive_mm(options.territory_size)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
-    if options.go_home_strategy not in GO_HOME_STRATEGIES:
-        parser.error(
-            "config go_home_strategy must be one of: "
-            f"{', '.join(GO_HOME_STRATEGIES)}"
-        )
     if options.exploration_policy not in EXPLORATION_POLICIES:
         parser.error(
             "config exploration_policy must be one of: "
             f"{', '.join(EXPLORATION_POLICIES)}"
         )
+
+
+def validate_docking_config(docking, parser):
+    """Validate dock initialization and go-home settings."""
+    if docking is None:
+        docking = {}
+    if not isinstance(docking, dict):
+        parser.error("config docking must be a mapping")
+    unknown = sorted(set(docking) - set(DEFAULT_DOCKING_CONFIG))
+    if unknown:
+        parser.error(f"unknown docking setting(s): {', '.join(unknown)}")
+    merged = {**DEFAULT_DOCKING_CONFIG, **docking}
+    if not isinstance(merged['init'], bool):
+        parser.error("config docking.init must be true or false")
+    if merged['go-home-strategy'] not in GO_HOME_STRATEGIES:
+        parser.error(
+            "config docking.go-home-strategy must be one of: "
+            f"{', '.join(GO_HOME_STRATEGIES)}"
+        )
+    return merged
+
+
+def validate_dashboard_config(dashboard, parser):
+    """Validate live dashboard settings."""
+    if dashboard is None:
+        dashboard = {}
+    if not isinstance(dashboard, dict):
+        parser.error("config dashboard must be a mapping")
+    unknown = sorted(set(dashboard) - set(DEFAULT_DASHBOARD_CONFIG))
+    if unknown:
+        parser.error(f"unknown dashboard setting(s): {', '.join(unknown)}")
+    merged = {**DEFAULT_DASHBOARD_CONFIG, **dashboard}
+    if not isinstance(merged['active'], bool):
+        parser.error("config dashboard.active must be true or false")
+    if not isinstance(merged['host'], str) or not merged['host'].strip():
+        parser.error("config dashboard.host must be a non-empty string")
+    try:
+        port = int(merged['port'])
+    except (TypeError, ValueError):
+        parser.error("config dashboard.port must be an integer")
+    if port <= 0 or port > 65535:
+        parser.error("config dashboard.port must be between 1 and 65535")
+    merged['port'] = port
+    return merged
 
 
 def validate_policy_config(policy, parser):
@@ -1210,11 +1261,13 @@ class _ExplorationRun:
         territory_mm=TERRITORY_MM,
         command_policy=None,
         exploration_policy=DEFAULT_EXPLORATION_POLICY,
+        dashboard=None,
     ):
         self.deg_per_yaw = deg_per_yaw
         self.mm_per_wd = mm_per_wd
         self.duration = duration
         self.command_policy = command_policy
+        self.dashboard = dashboard
 
         self.yaw_prev = send_command('get_yaw')['result']
         self.left_prev = send_command('get_left_wheel')['result']
@@ -1294,8 +1347,25 @@ class _ExplorationRun:
                 self.known_path, STRATEGY_SAMPLE_DISTANCES
             )
         self.known_path.append((self.x, self.y))
+        self.publish_dashboard_pose(duration=0.0)
 
     # -- pose tracking -----------------------------------------------------
+    def publish_dashboard_pose(self, event=None, duration=None):
+        if self.dashboard is None:
+            return
+        try:
+            move = {
+                'pose': [self.x, self.y, self.heading],
+                'timestamp': datetime.now().isoformat(timespec='seconds'),
+            }
+            if event is not None:
+                move['event'] = event
+            if duration is not None:
+                move['duration'] = duration
+            self.dashboard.post_move(move)
+        except Exception as exc:
+            print(f"\n  [dashboard warning] failed to publish pose: {exc}")
+
     def update_pose(self, action, requested):
         yaw_now = read_settled('get_yaw')
         left_now = read_settled('get_left_wheel')
@@ -1358,6 +1428,7 @@ class _ExplorationRun:
             )
             self.quality['accepted_updates'] += 1
             self.policy.report_progress()
+            self.publish_dashboard_pose(event)
         self.events.append(event)
         if not event['accepted']:
             return None
@@ -1784,6 +1855,7 @@ def explore(
     territory_mm=TERRITORY_MM,
     command_policy=None,
     exploration_policy=DEFAULT_EXPLORATION_POLICY,
+    dashboard=None,
 ):
     """Drive one exploration run and return its recorded map contribution.
 
@@ -1801,6 +1873,7 @@ def explore(
         territory_mm,
         command_policy,
         exploration_policy,
+        dashboard,
     )
     run.announce()
     if not command_policy:
@@ -1923,7 +1996,10 @@ def main(args=None):
         if calibration_override:
             deg_per_yaw, mm_per_wd = calibration_override
         print(f"=== Starting from dock with knowledge from {source_map_file} ===")
-        dock_to_corner(deg_per_yaw, mm_per_wd)
+        if options.docking['init']:
+            dock_to_corner(deg_per_yaw, mm_per_wd)
+        else:
+            print("  Skipping initial dock positioning sequence (docking.init=false)")
         x0, y0, heading0 = map_start_pose(strategy_map)
         print(
             f"  Anchored to saved starting pose: "
@@ -1931,35 +2007,62 @@ def main(args=None):
         )
     else:
         deg_per_yaw, mm_per_wd = calibration_override or load_calibration()
-        x0, y0 = dock_to_corner(deg_per_yaw, mm_per_wd)
+        if options.docking['init']:
+            x0, y0 = dock_to_corner(deg_per_yaw, mm_per_wd)
+        else:
+            print("=== Skipping initial dock positioning sequence (docking.init=false) ===")
+            x0, y0 = DOCK_CLEARANCE_MM, DOCK_CLEARANCE_MM
         heading0 = 0.0
 
     img_path = map_file.with_suffix('.png')
-
-    if options.mode == 'dock':
-        produced_runs = go_home_with_retries(
-            strategy_map,
-            deg_per_yaw,
-            mm_per_wd,
-            strategy=GO_HOME_STRATEGIES[options.go_home_strategy],
+    dashboard_server = None
+    live_dashboard = None
+    if options.dashboard['active'] and options.mode != 'dock':
+        try:
+            from apps.map.dashboard import start_dashboard_server
+        except ModuleNotFoundError:
+            from dashboard import start_dashboard_server
+        dashboard_server, live_dashboard, _dashboard_thread = start_dashboard_server(
+            options.dashboard['host'],
+            options.dashboard['port'],
+            'Dash Live Map Dashboard',
+            options.territory_size,
         )
-        if not produced_runs:
-            return
-    else:
-        produced_runs = [
-            explore(
+        print(
+            f"Dashboard listening on "
+            f"http://{options.dashboard['host']}:{options.dashboard['port']}"
+        )
+
+    try:
+        if options.mode == 'dock':
+            produced_runs = go_home_with_retries(
+                strategy_map,
                 deg_per_yaw,
                 mm_per_wd,
-                x0,
-                y0,
-                heading0,
-                strategy_map,
-                duration=options.duration,
-                territory_mm=options.territory_size,
-                command_policy=command_policy,
-                exploration_policy=options.exploration_policy,
+                strategy=GO_HOME_STRATEGIES[options.go_home_strategy],
             )
-        ]
+            if not produced_runs:
+                return
+        else:
+            produced_runs = [
+                explore(
+                    deg_per_yaw,
+                    mm_per_wd,
+                    x0,
+                    y0,
+                    heading0,
+                    strategy_map,
+                    duration=options.duration,
+                    territory_mm=options.territory_size,
+                    command_policy=command_policy,
+                    exploration_policy=options.exploration_policy,
+                    dashboard=live_dashboard,
+                )
+            ]
+    finally:
+        if dashboard_server is not None:
+            dashboard_server.shutdown()
+            dashboard_server.server_close()
     for run in produced_runs:
         save_map(
             deg_per_yaw,
