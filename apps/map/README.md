@@ -383,6 +383,11 @@ curl -X POST http://127.0.0.1:8000/move \
 
 The browser animates each posted pose as it arrives. Use the dashboard's Save
 animation button to download a standalone HTML replay of the live session.
+
+On a `resume` run, the mapper first POSTs the prior map's coverage and known
+blockers to the dashboard's `/seed` endpoint, so already-mapped visited,
+blocked, and unreachable cells show from the first pose rather than appearing
+empty until the robot re-explores.
 - Draws the conservative-exploration territories and their 4×4 cell grids,
   labeling each cell's coordinate and coloring it by live state as the run
   progresses.

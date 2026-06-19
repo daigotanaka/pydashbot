@@ -309,26 +309,33 @@ class DashboardPublisher:
 
     The dashboard is its own app (``python -m apps.dashboard``); start it
     first, then run a mapping session with ``dashboard.active: true``. This
-    client just POSTs each pose to the server's ``/move`` endpoint -- nothing in
-    the mapping app imports the dashboard package.
+    client just POSTs poses to the server's ``/move`` endpoint (and prior-run
+    coverage to ``/seed`` on a resume) -- nothing in the mapping app imports the
+    dashboard package.
     """
 
     def __init__(self, host, port, timeout=1.0):
         # 0.0.0.0 is a valid bind address for the server but not a connect
         # target; reach a server bound to all interfaces via the loopback.
         connect_host = '127.0.0.1' if host in ('', '0.0.0.0') else host
-        self.url = f'http://{connect_host}:{port}/move'
+        self.base_url = f'http://{connect_host}:{port}'
+        self.url = f'{self.base_url}/move'
         self.timeout = timeout
 
-    def post_move(self, move):
-        body = json.dumps(move).encode('utf-8')
+    def _post(self, endpoint, payload):
         request = urllib.request.Request(
-            self.url,
-            data=body,
+            f'{self.base_url}{endpoint}',
+            data=json.dumps(payload).encode('utf-8'),
             headers={'Content-Type': 'application/json'},
             method='POST',
         )
         urllib.request.urlopen(request, timeout=self.timeout).close()
+
+    def post_move(self, move):
+        self._post('/move', move)
+
+    def seed(self, seed):
+        self._post('/seed', seed)
 
 
 def validate_policy_config(policy, parser):
@@ -1380,10 +1387,40 @@ class _ExplorationRun:
             self.policy = policy_class(
                 self.known_path, STRATEGY_SAMPLE_DISTANCES
             )
+        # Prime the dashboard with prior-run coverage and blockers (resume
+        # only) before the live frames start, so already-mapped visited /
+        # blocked / unreachable cells show from the first pose.
+        self.seed_dashboard()
         self.known_path.append((self.x, self.y))
         self.publish_dashboard_pose(duration=0.0)
 
     # -- pose tracking -----------------------------------------------------
+    def seed_dashboard(self):
+        """Send prior-run coverage and known blockers to the live dashboard.
+
+        On a resume, self.known_path / known_walls / known_obstacles carry the
+        prior map; seeding them lets the dashboard resolve already-explored
+        visited cells and the blocked/unreachable regions behind known walls
+        before the robot moves. A no-op for a fresh start (no prior knowledge).
+        """
+        if self.dashboard is None:
+            return
+        if not (self.known_path or self.known_walls or self.known_obstacles):
+            return
+        try:
+            self.dashboard.seed({
+                'path': [list(point) for point in self.known_path],
+                'walls': [list(point) for point in self.known_walls],
+                'obstacles': [list(point) for point in self.known_obstacles],
+            })
+        except Exception as exc:
+            if not self._dashboard_warned:
+                print(
+                    f"\n  [dashboard warning] failed to seed prior map "
+                    f"(is the dashboard server running?): {exc}"
+                )
+                self._dashboard_warned = True
+
     def publish_dashboard_pose(self, event=None, duration=None):
         if self.dashboard is None:
             return

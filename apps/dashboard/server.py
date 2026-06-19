@@ -308,6 +308,10 @@ def empty_payload(territory_mm=TERRITORY_MM):
         'frames': [],
         'durations': [],
         'run_count': 1,
+        # Prior-run coverage seeded on a resume (see apply_seed): densified path
+        # points that prime visited/unreachable resolution without creating
+        # animation frames.
+        'seed_path': [],
     }
 
 
@@ -379,19 +383,26 @@ def resolve_live_cells(payload):
     territory_mm = payload['territory_mm']
     grid_mm = payload['grid_mm']
     frames = payload['frames']
+    seed_path = [(p[0], p[1]) for p in payload.get('seed_path', [])]
 
-    # Territories the robot has entered, in first-seen order, plus the focus
-    # (the territory holding the most recent pose).
+    # Territories with coverage, in first-seen order: any seeded prior-run cell
+    # plus any the robot has entered this run, then the focus (the territory
+    # holding the most recent pose).
     territories = []
+    for x, y in seed_path:
+        territory = _live_territory(x, y, territory_mm)
+        if territory not in territories:
+            territories.append(territory)
     for frame in frames:
         territory = _live_territory(frame['x'], frame['y'], territory_mm)
         if territory not in territories:
             territories.append(territory)
-    focus = (
-        _live_territory(frames[-1]['x'], frames[-1]['y'], territory_mm)
-        if frames
-        else tuple(payload.get('focus', (0, 0)))
-    )
+    if frames:
+        focus = _live_territory(frames[-1]['x'], frames[-1]['y'], territory_mm)
+    elif territories:
+        focus = territories[-1]
+    else:
+        focus = tuple(payload.get('focus', (0, 0)))
     if focus not in territories:
         territories.append(focus)
     if not territories:
@@ -402,16 +413,18 @@ def resolve_live_cells(payload):
         for seg in payload.get('wall_segments', [])
     ]
 
-    traversed = []  # densified points accumulated across frames
+    # Prior-run coverage is present from the first frame on, so it primes the
+    # traversed trail that every frame's resolution accumulates onto.
+    traversed = list(seed_path)
     for gi, frame in enumerate(frames):
-        if gi > 0:
+        if gi == 0:
+            traversed.append((frame['x'], frame['y']))
+        else:
             prev = frames[gi - 1]
             segment = densify_path(
                 [(prev['x'], prev['y']), (frame['x'], frame['y'])], grid_mm / 2
             )
-            traversed.extend(segment[1:] if traversed else segment)
-        elif not traversed:
-            traversed.append((frame['x'], frame['y']))
+            traversed.extend(segment[1:])
 
         blockers = [
             (b[0], b[1]) for b in payload['walls'] if b[2] <= gi
@@ -463,6 +476,32 @@ def apply_live_move(payload, move):
     return frame
 
 
+def apply_seed(payload, seed):
+    """Prime a live payload with prior-run knowledge for a resume.
+
+    Seeds already-explored coverage (`path`) and known blockers (`walls`,
+    `obstacles`) so the live map shows prior visited / blocked / unreachable
+    cells before the robot moves. Unlike a move, a seed creates no animation
+    frame -- it only sets the cumulative state that resolve_live_cells applies
+    to every frame. Blockers are revealed from frame 0 (reveal index 0) since
+    they were already known when this run began. Replaces any earlier seed.
+    """
+    payload['seed_path'] = [
+        [round(float(p[0]), 2), round(float(p[1]), 2)]
+        for p in seed.get('path', [])
+    ]
+    payload['walls'] = [
+        [round(float(p[0]), 2), round(float(p[1]), 2), 0]
+        for p in seed.get('walls', [])
+    ]
+    payload['obstacles'] = [
+        [round(float(p[0]), 2), round(float(p[1]), 2), 0]
+        for p in seed.get('obstacles', [])
+    ]
+    recompute_wall_segments(payload)
+    resolve_live_cells(payload)
+
+
 class LiveDashboard:
     def __init__(self, title='Dash Live Map Dashboard', territory_mm=TERRITORY_MM):
         self.title = title
@@ -476,6 +515,10 @@ class LiveDashboard:
     def post_move(self, move):
         with self.lock:
             return apply_live_move(self.payload, move)
+
+    def seed(self, seed):
+        with self.lock:
+            apply_seed(self.payload, seed)
 
     def static_html(self):
         payload = self.snapshot()
@@ -563,13 +606,18 @@ def make_handler(dashboard):
                 self.send_json({'error': 'not found'}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self):
-            if urlparse(self.path).path not in ('/move', '/moves'):
+            path = urlparse(self.path).path
+            if path not in ('/move', '/moves', '/seed'):
                 self.send_json({'error': 'not found'}, HTTPStatus.NOT_FOUND)
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 body = self.rfile.read(length).decode('utf-8')
                 data = json.loads(body) if body else {}
+                if path == '/seed':
+                    dashboard.seed(data if isinstance(data, dict) else {})
+                    self.send_json({'ok': True, 'seeded': True})
+                    return
                 moves = data if isinstance(data, list) else data.get('moves', [data])
                 frames = [dashboard.post_move(move) for move in moves]
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
