@@ -934,7 +934,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   * { box-sizing: border-box; }
   html, body {
-    margin: 0; height: 100%;
+    margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
     background: radial-gradient(1200px 800px at 70% -10%, #182338, transparent),
                 var(--bg);
     background-color: var(--bg);
@@ -943,7 +943,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                  Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  .app { display: flex; flex-direction: column; height: 100vh; }
+  /* 100dvh tracks the *visible* viewport so iOS Safari's toolbars don't push
+     the footer off-screen; 100vh is the fallback for older browsers. */
+  .app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
   header {
     padding: 14px 22px; display: flex; align-items: baseline; gap: 16px;
     border-bottom: 1px solid var(--grid);
@@ -1036,6 +1038,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   @media (max-width: 640px) {
     .panel-toggle { display: grid; }
+    /* Clip the off-screen panel at its containing block so it can't be reached
+       by scrolling the page sideways. */
+    .stage { overflow: hidden; }
     aside {
       position: absolute; top: 0; right: 0; bottom: 0; z-index: 20;
       width: min(86vw, 320px); transform: translateX(100%);
