@@ -951,7 +951,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
   header .sub { color: var(--muted); font-size: 12.5px; }
-  .stage { flex: 1; display: flex; min-height: 0; }
+  .stage { flex: 1; display: flex; min-height: 0; position: relative; }
   .canvas-wrap { flex: 1; position: relative; min-width: 0; }
   canvas { display: block; width: 100%; height: 100%; cursor: grab; }
   canvas.dragging { cursor: grabbing; }
@@ -1026,6 +1026,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     color: var(--muted); background: rgba(11,15,26,.7); padding: 6px 10px;
     border-radius: 7px; border: 1px solid var(--grid); pointer-events: none;
   }
+  /* Side panel toggle: hidden on wide screens, shown on narrow/portrait ones
+     where the panel collapses into a slide-over. */
+  .panel-toggle {
+    display: none; position: absolute; top: 12px; right: 12px; z-index: 30;
+    width: 40px; height: 40px; border-radius: 9px; place-items: center;
+    background: var(--panel-2); color: var(--ink); border: 1px solid var(--grid);
+    cursor: pointer; font-size: 16px;
+  }
+  @media (max-width: 640px) {
+    .panel-toggle { display: grid; }
+    aside {
+      position: absolute; top: 0; right: 0; bottom: 0; z-index: 20;
+      width: min(86vw, 320px); transform: translateX(100%);
+      transition: transform .22s ease;
+      box-shadow: -10px 0 28px rgba(0,0,0,.45);
+    }
+    .stage.show-panel aside { transform: translateX(0); }
+    /* Let the playback controls wrap instead of overflowing the narrow screen
+       (which would push the panel toggle off-edge). */
+    footer { flex-wrap: wrap; row-gap: 10px; }
+    .scrub { order: 3; flex-basis: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -1035,6 +1057,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span class="sub" id="headerSub"></span>
   </header>
   <div class="stage">
+    <button class="panel-toggle" id="panelToggle" aria-label="Show or hide the side panel" title="Show or hide the side panel">&#9776;</button>
     <div class="canvas-wrap">
       <canvas id="view"></canvas>
       <div class="hint">drag to pan &middot; scroll to zoom &middot; double-click to reset</div>
@@ -1607,6 +1630,15 @@ seek.addEventListener('input', () => {
 });
 document.getElementById('speed').addEventListener('change', (e) => {
   speed = parseFloat(e.target.value);
+});
+
+// Side panel collapse (mobile/portrait): toggle the slide-over and swap the
+// button glyph between hamburger (open) and close.
+const panelToggle = document.getElementById('panelToggle');
+const stageEl = document.querySelector('.stage');
+panelToggle.addEventListener('click', () => {
+  const open = stageEl.classList.toggle('show-panel');
+  panelToggle.innerHTML = open ? '&#10005;' : '&#9776;';
 });
 
 // pan & zoom
