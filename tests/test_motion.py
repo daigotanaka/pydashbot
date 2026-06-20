@@ -274,9 +274,18 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ArcTests(unittest.IsolatedAsyncioTestCase):
-    def make_robot(self):
+    def make_robot(self, prox_left=0, prox_right=0):
         robot = DashRobot.__new__(DashRobot)
         robot.command = AsyncMock()
+        robot.stop = AsyncMock()
+        robot.say = AsyncMock()
+        robot.get_prox_left = lambda: prox_left
+        robot.get_prox_right = lambda: prox_right
+        robot.get_prox_rear = lambda: 0
+        dash_times = count()
+        robot.get_dash_time = lambda: next(dash_times)
+        yaws = iter((0, 0))
+        robot.get_yaw = lambda: next(yaws)
         return robot
 
     def test_arc_relative_pose_geometry(self):
@@ -304,7 +313,8 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()) as sleep:
             robot = self.make_robot()
-            outcome = await robot.arc(100, 90)  # quarter circle, R=100, left
+            # Isolate the motion encoding from obstacle monitoring.
+            outcome = await robot.arc(100, 90, stop_at_obstacle=False)
 
         method, packet = robot.command.await_args.args
         self.assertEqual(method, "pose")
@@ -325,7 +335,7 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
     async def test_arc_splits_wide_sweeps_into_subarcs(self):
         with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
             robot = self.make_robot()
-            outcome = await robot.arc(100, 180)  # half-circle -> two 90 deg arcs
+            outcome = await robot.arc(100, 180, stop_at_obstacle=False)
 
         # A single 180 deg arc's target is nearly pure-lateral and stalls; it is
         # split into forward-dominant sub-arcs instead.
@@ -338,6 +348,38 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(x_field, 100)  # each sub-arc is a 90 deg, x=100
         # The reported pose is still the full intended arc.
         self.assertEqual(outcome["rel_pose_mm"][2], 180.0)
+
+    async def test_arc_stops_on_obstacle_and_reports_completed_angle(self):
+        robot = self.make_robot(prox_left=99)  # wall dead ahead
+
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
+                get_loop.return_value.time.side_effect = [0, 0.01, 0.02, 0.03, 0.04]
+                outcome = await robot.arc(120, 90)  # would sweep 90, but blocked
+
+        self.assertEqual(outcome["halt"], "obstacle")
+        self.assertEqual(outcome["side"], "front")
+        self.assertEqual(outcome["prox_left"], 99)
+        robot.stop.assert_awaited_once()
+        # Stopped almost immediately -> only a sliver of the 90 deg sweep done.
+        self.assertEqual(outcome["requested_angle_deg"], 90.0)
+        self.assertLess(outcome["completed_angle_deg"], 90.0)
+        self.assertLess(outcome["completed_fraction"], 1.0)
+        self.assertIn("yaw_delta", outcome)
+
+    async def test_arc_completes_when_path_stays_clear(self):
+        robot = self.make_robot(prox_left=0, prox_right=0)
+
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            with patch("dash.core.motion.asyncio.get_running_loop") as get_loop:
+                # Second poll is past the deadline -> the segment finishes clear.
+                get_loop.return_value.time.side_effect = [0, 0.1, 0.5]
+                outcome = await robot.arc(60, 45)
+
+        self.assertEqual(outcome["halt"], "completed")
+        self.assertEqual(outcome["completed_fraction"], 1.0)
+        self.assertEqual(outcome["completed_angle_deg"], 45.0)
+        robot.stop.assert_not_awaited()
 
 
 if __name__ == "__main__":

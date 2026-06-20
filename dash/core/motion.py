@@ -144,6 +144,10 @@ class MotionController:
         direction=PoseDirection.FORWARD,
         ease=True,
         max_segment_deg=ARC_MAX_SEGMENT_DEG,
+        stop_at_obstacle=True,
+        proximity_threshold=PROXIMITY_STOP_THRESHOLD,
+        proximity_confirm_count=PROXIMITY_CONFIRM_COUNT,
+        wall_stop_sound=None,
     ):
         """Drive a smooth circular arc of ``radius_mm`` sweeping ``angle_deg``.
 
@@ -152,28 +156,38 @@ class MotionController:
         but carrying forward, lateral, and rotation together), so the path is a
         continuous curve rather than a move-then-turn. Positive ``angle_deg``
         curves left (CCW); negative curves right. ``ease`` ramps speed at the
-        ends for a smooth start/stop. Returns the intended relative pose so a
-        caller can reconcile it against odometry.
+        ends for a smooth start/stop.
 
-        Verified on hardware (radius 120 mm, +/-60 deg): the robot traces a real
-        curve, x/y units are correct (encode_pose treats them as cm, x10 to
-        match move()'s mm field), and positive ``angle_deg`` curves left. Like
-        every Dash rotation it *under-rotates* (~15-20 deg lost to the startup
-        deadband) and the inner wheel barely turns, so the gyro is the truth for
-        heading -- reconcile against odometry at a higher level. Deadband-
-        compensating the swept angle (as turn() does) did *not* reliably correct
-        it on hardware, so the requested angle is sent as-is.
+        Like move(), when ``stop_at_obstacle`` is set the path is monitored and
+        halts on a confirmed proximity reading. The outcome reports how much of
+        the sweep was completed -- ``completed_angle_deg`` is a time-based
+        estimate (calibration-free but approximate under easing), and
+        ``yaw_delta`` is the raw gyro change, which times the calibrated
+        ``deg_per_yaw`` gives the exact swept angle (reliable here because an
+        interrupted arc is partial, below the gyro's ~155 deg wrap).
 
-        Sweeps wider than ``max_segment_deg`` are split into that-sized sub-arcs
-        chained back to back; a single near-180 deg arc has an almost purely
-        lateral target a differential robot can't reach, so it stalls before
-        completing, whereas each forward-dominant sub-arc completes.
+        Hardware-verified (R=120 mm, +/-60 deg): real curve, x/y in cm (x10 to
+        match move()'s mm field), +angle = left. It under-rotates ~15-20 deg
+        like every Dash rotation, and the inner wheel barely turns, so the gyro
+        is the heading truth -- reconcile against odometry at a higher level.
+        Sweeps wider than ``max_segment_deg`` are split into forward-dominant
+        sub-arcs: a single near-180 deg arc's target is almost purely lateral
+        (x = R sin phi -> 0), which a differential robot can't reach in one
+        move, so it stalls; each sub-arc completes.
         """
         segments = max(1, math.ceil(abs(float(angle_deg)) / max(1.0, max_segment_deg)))
         segment_deg = float(angle_deg) / segments
         segment_len_mm = abs(radius_mm) * abs(math.radians(segment_deg))
         segment_seconds = segment_len_mm / max(1.0, abs(speed_mmps))
+        total_seconds = segment_seconds * segments
         x_seg, y_seg, _ = arc_relative_pose(radius_mm, segment_deg)
+        # Forward arcs watch the front sensors; a backward arc watches the rear.
+        probe = -1 if direction == PoseDirection.BACKWARD else 1
+
+        yaw_before = self.get_yaw() if stop_at_obstacle else None
+        elapsed = 0.0
+        halt = "completed"
+        readings = {}
         for _ in range(segments):
             await self.command(
                 "pose",
@@ -188,17 +202,55 @@ class MotionController:
                     ease=ease,
                 ),
             )
-            await asyncio.sleep(segment_seconds)
-        x_mm, y_mm, theta_deg = arc_relative_pose(radius_mm, angle_deg)
-        return {
-            "halt": "completed",
-            "monitored": False,
+            if not stop_at_obstacle:
+                await asyncio.sleep(segment_seconds)
+                elapsed += segment_seconds
+                continue
+            loop = asyncio.get_running_loop()
+            segment_start = loop.time()
+            deadline = segment_start + segment_seconds
+            streak = 0
+            last_proximity_time = self.get_dash_time()
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    elapsed += segment_seconds
+                    break
+                await asyncio.sleep(min(PROXIMITY_POLL_INTERVAL, remaining))
+                proximity_time = self.get_dash_time()
+                if proximity_time is None or proximity_time != last_proximity_time:
+                    last_proximity_time = proximity_time
+                    detected, reading = self._obstacle_in_path(
+                        probe, proximity_threshold, REAR_PROXIMITY_STOP_THRESHOLD
+                    )
+                    streak = streak + 1 if detected else 0
+                    if streak >= proximity_confirm_count:
+                        await self._stop_for_obstacle(wall_stop_sound)
+                        elapsed += loop.time() - segment_start
+                        halt = "obstacle"
+                        readings = reading
+                        break
+            if halt == "obstacle":
+                break
+
+        completed_fraction = 1.0 if total_seconds <= 0 else min(1.0, elapsed / total_seconds)
+        completed_deg = float(angle_deg) * completed_fraction
+        x_mm, y_mm, _ = arc_relative_pose(radius_mm, completed_deg)
+        outcome = {
+            "halt": halt,
+            "monitored": stop_at_obstacle,
             "radius_mm": abs(radius_mm),
-            "angle_deg": float(angle_deg),
+            "requested_angle_deg": float(angle_deg),
+            "completed_angle_deg": round(completed_deg, 1),
+            "completed_fraction": round(completed_fraction, 3),
             "segments": segments,
-            "rel_pose_mm": [round(x_mm, 1), round(y_mm, 1), round(theta_deg, 1)],
-            "seconds": round(segment_seconds * segments, 3),
+            "rel_pose_mm": [round(x_mm, 1), round(y_mm, 1), round(completed_deg, 1)],
+            "seconds": round(elapsed, 3),
         }
+        if yaw_before is not None:
+            outcome["yaw_delta"] = wrap_signed_delta(yaw_before, self.get_yaw(), 12)
+        outcome.update(readings)
+        return outcome
 
     async def move(
         self,
