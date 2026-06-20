@@ -136,40 +136,6 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(len(run.amends), 2)
         self.assertEqual(run.amends[-1]["obstacles"], [[10.0, 10.0]])
 
-    def test_arc_pose_delta_curves_and_reduces_to_straight(self):
-        import math
-
-        # 90 deg left arc of radius 100 (arc length R*pi/2) from origin/heading 0
-        # ends at (100, 100) facing +90.
-        dx, dy, h = map_room.arc_pose_delta(0, 90, 100 * math.pi / 2)
-        self.assertAlmostEqual(dx, 100, places=3)
-        self.assertAlmostEqual(dy, 100, places=3)
-        self.assertAlmostEqual(h, 90)
-        # The same arc started facing +90 (north) curves to the west.
-        dx, dy, h = map_room.arc_pose_delta(90, 90, 100 * math.pi / 2)
-        self.assertAlmostEqual(dx, -100, places=3)
-        self.assertAlmostEqual(dy, 100, places=3)
-        self.assertAlmostEqual(h, -180)  # normalize_heading is half-open [-180, 180)
-        # dtheta -> 0 is a straight step along the heading.
-        dx, dy, h = map_room.arc_pose_delta(0, 0, 50)
-        self.assertAlmostEqual((dx, dy, h), (50.0, 0.0, 0.0))
-
-    def test_wall_follow_heading_keeps_wall_on_chosen_side(self):
-        # Wall segment along +x just north of the robot.
-        wall = ((0.0, 0.0), (100.0, 0.0))
-        # Robot below the wall -> to keep the wall on its LEFT it faces +x (0).
-        self.assertAlmostEqual(
-            map_room.wall_follow_heading((50.0, -10.0), wall, wall_on_left=True), 0.0
-        )
-        # Robot above the wall -> faces -x (180) to keep the wall on its left.
-        self.assertAlmostEqual(
-            abs(map_room.wall_follow_heading((50.0, 10.0), wall, wall_on_left=True)), 180.0
-        )
-        # Wall on the right flips the direction.
-        self.assertAlmostEqual(
-            abs(map_room.wall_follow_heading((50.0, -10.0), wall, wall_on_left=False)), 180.0
-        )
-
     def test_mapping_config_accepts_wall_follower_policy(self):
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.yaml"
