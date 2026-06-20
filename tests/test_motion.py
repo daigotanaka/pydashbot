@@ -300,7 +300,7 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(arc_relative_pose(100, 0), (0.0, 0.0, 0.0))
 
     async def test_arc_sends_pose_with_forward_and_lateral_displacement(self):
-        from dash.core.motion import ARC_SPEED_MMPS
+        from dash.core.motion import ARC_SPEED_MMPS, arc_relative_pose
 
         with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()) as sleep:
             robot = self.make_robot()
@@ -309,11 +309,12 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
         method, packet = robot.command.await_args.args
         self.assertEqual(method, "pose")
         # Unlike a plain move, the packet carries BOTH a forward (x) and a
-        # lateral (y) component -- that is what makes it an arc.
+        # lateral (y) component -- that is what makes it an arc; a left arc
+        # bends to +lateral.
         x_field = packet[0] | ((packet[5] & 0x3F) << 8)
         y_field = packet[1] | ((packet[6] & 0x3F) << 8)
         self.assertEqual(x_field, 100)  # x_mm = 100 -> 10 cm * 10
-        self.assertEqual(y_field, 100)  # y_mm = 100
+        self.assertEqual(y_field, 100)  # y_mm = 100 (left -> +lateral)
         # Duration is timed off the arc length (R * phi) at the arc speed.
         self.assertAlmostEqual(
             sleep.await_args.args[0], (100 * math.pi / 2) / ARC_SPEED_MMPS

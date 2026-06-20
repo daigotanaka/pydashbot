@@ -149,10 +149,15 @@ class MotionController:
         speed at the ends for a smooth start/stop. Returns the commanded
         relative pose so a caller can reconcile it against odometry.
 
-        Conventions to confirm on hardware: encode_pose treats x/y as cm (it
-        multiplies by 10 to match the mm field move() writes), and the left/CCW
-        sign of ``angle_deg``/``y`` follows the math frame -- flip them here if
-        the robot curves the wrong way or mirrors the turn.
+        Verified on hardware (radius 120 mm, +/-60 deg): the robot traces a real
+        curve in one move, x/y units are correct (encode_pose treats them as cm,
+        x10 to match move()'s mm field), and positive ``angle_deg`` curves left.
+        Like every Dash rotation it *under-rotates* (~15-20 deg of the sweep is
+        lost to the startup deadband) and the inner wheel barely turns, so the
+        gyro is the truth for heading -- reconcile this outcome against odometry
+        at a higher level. NOTE: deadband-compensating the swept angle (as
+        turn() does) did *not* reliably correct the arc heading on hardware, so
+        the requested angle is sent as-is.
         """
         x_mm, y_mm, theta_deg = arc_relative_pose(radius_mm, angle_deg)
         arc_length_mm = abs(radius_mm) * abs(math.radians(angle_deg))
@@ -175,7 +180,7 @@ class MotionController:
             "halt": "completed",
             "monitored": False,
             "radius_mm": abs(radius_mm),
-            "angle_deg": angle_deg,
+            "angle_deg": float(angle_deg),
             "rel_pose_mm": [round(x_mm, 1), round(y_mm, 1), round(theta_deg, 1)],
             "seconds": round(seconds, 3),
         }
