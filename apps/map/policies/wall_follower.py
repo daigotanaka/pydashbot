@@ -19,6 +19,11 @@ one-way: main imports this module, not the reverse.
 import math
 import time
 
+try:
+    from apps.map.policies.exploration_policy_base import ExplorationPolicy
+except ModuleNotFoundError:
+    from policies.exploration_policy_base import ExplorationPolicy
+
 DEFAULT_RADIUS_MM = 250
 DEFAULT_ARC_DEG = 360
 DEFAULT_WALL_ON_LEFT = True  # keep the wall on the left -> arc clockwise (CW)
@@ -79,10 +84,17 @@ def wall_follow_heading(robot_xy, segment, wall_on_left=True):
     return _normalize_heading(math.degrees(theta))
 
 
-class WallFollower:
-    """Drive an exploration run along walls using arcs (see module docstring)."""
+class WallFollower(ExplorationPolicy):
+    """Drive an exploration run along walls using arcs (see module docstring).
+
+    It is a self-driving controller rather than a heading-preference policy, but
+    inherits ``ExplorationPolicy`` so it shares the common base. The abstract
+    ``heading_preference`` is unused (the loop in ``follow`` decides motion), so
+    it returns a neutral 0.
+    """
 
     name = 'wall-follower'
+    metadata_key = 'wall_follower'
 
     def __init__(
         self,
@@ -93,6 +105,24 @@ class WallFollower:
         self.radius_mm = radius_mm
         self.arc_deg = arc_deg
         self.wall_on_left = wall_on_left
+
+    def heading_preference(self, x, y, heading):
+        """Unused: the wall follower drives itself via follow()."""
+        return 0.0
+
+    def describe(self):
+        side = 'left' if self.wall_on_left else 'right'
+        return (
+            f"  Wall follower: arc R={self.radius_mm}mm around walls "
+            f"(wall on the {side})."
+        )
+
+    def metadata(self):
+        return {
+            'radius_mm': self.radius_mm,
+            'arc_deg': self.arc_deg,
+            'wall_on_left': self.wall_on_left,
+        }
 
     def target_heading(self, robot_xy, wall_segments):
         """Heading to face along the nearest wall, or None if none is known."""

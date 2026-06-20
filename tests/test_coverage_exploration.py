@@ -3,7 +3,7 @@ import unittest
 
 from apps.map.policies import conservative_exploration as conservative
 from apps.map.policies.coverage_exploration import STALL_LEGS, CoverageExploration
-from apps.map.policies.exploration_policy import ExplorationPolicy
+from apps.map.policies.exploration_policy_base import ExplorationPolicy
 
 FULLY_EXPLORED_SOUTH = [
     (x, y)

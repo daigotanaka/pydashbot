@@ -3,14 +3,14 @@
 import math
 
 try:
-    from apps.map.policies.exploration_policy import ExplorationPolicy
+    from apps.map.policies.exploration_policy_base import ExplorationPolicy
     from apps.map.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,
         segment_crosses_wall,
     )
 except ModuleNotFoundError:
-    from policies.exploration_policy import ExplorationPolicy
+    from policies.exploration_policy_base import ExplorationPolicy
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         point_segment_distance,

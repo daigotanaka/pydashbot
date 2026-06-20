@@ -32,7 +32,7 @@ try:
         territory_cell,
     )
     from apps.map.policies.coverage_exploration import CoverageExploration
-    from apps.map.policies.exploration_policy import NoveltyExplorationPolicy
+    from apps.map.policies.novelty_exploration import NoveltyExplorationPolicy
     from apps.map.policies.wall_follower import WallFollower, arc_pose_delta
     from apps.map.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
@@ -54,7 +54,7 @@ except ModuleNotFoundError:
         territory_cell,
     )
     from policies.coverage_exploration import CoverageExploration
-    from policies.exploration_policy import NoveltyExplorationPolicy
+    from policies.novelty_exploration import NoveltyExplorationPolicy
     from policies.wall_follower import WallFollower, arc_pose_delta
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
