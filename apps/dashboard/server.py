@@ -64,6 +64,40 @@ def cell_state_lookup(resolution):
     return states
 
 
+# A leg counts as a curved arc (rather than a straight move or in-place turn)
+# only when it both travels and rotates by more than these. Forward legs barely
+# rotate; turns barely travel; arcs do both.
+ARC_MIN_CHORD_MM = 20.0
+ARC_MIN_SWEEP_DEG = 5.0
+
+
+def _normalize_deg(angle):
+    """Wrap degrees to [-180, 180)."""
+    return (angle + 180) % 360 - 180
+
+
+def arc_from_poses(start_pose, end_pose):
+    """Reconstruct ``{radius_mm, angle_deg}`` for a curved leg, or ``None``.
+
+    The saved poses were produced by sweeping a circular arc, so the chord and
+    the swept angle alone recover the radius (``chord = 2 R sin(theta/2)``) --
+    the same geometry the live path sends (see main.py ``_amend_dashboard``),
+    but read straight off the path so it never depends on the event list lining
+    up with the path nodes.
+    """
+    if len(start_pose) < 3 or len(end_pose) < 3:
+        return None
+    angle = _normalize_deg(float(end_pose[2]) - float(start_pose[2]))
+    chord = math.hypot(
+        float(end_pose[0]) - float(start_pose[0]),
+        float(end_pose[1]) - float(start_pose[1]),
+    )
+    if chord < ARC_MIN_CHORD_MM or abs(angle) < ARC_MIN_SWEEP_DEG:
+        return None
+    radius = chord / (2.0 * math.sin(math.radians(abs(angle)) / 2.0))
+    return {'radius_mm': round(radius, 1), 'angle_deg': round(angle, 2)}
+
+
 def build_frames(runs, territories, walls_rev, obstacles_rev, segments_rev,
                  territory_mm):
     """Precompute robot pose and per-territory cell states at every path node.
@@ -114,7 +148,7 @@ def build_frames(runs, territories, walls_rev, obstacles_rev, segments_rev,
                     for cx in range(GRID_CELLS)
                     for cy in range(GRID_CELLS)
                 }
-            frames.append({
+            frame = {
                 'run': run_index,
                 'node': node_index,
                 'timestamp': timestamp,
@@ -122,7 +156,14 @@ def build_frames(runs, territories, walls_rev, obstacles_rev, segments_rev,
                 'y': round(y, 2),
                 'heading': round(heading, 2),
                 'cells': cells,
-            })
+            }
+            # Draw a curved leg as a curve: reconstruct the arc from this node
+            # and the one before it (same geometry the live dashboard receives).
+            if node_index > 0:
+                arc = arc_from_poses(path[node_index - 1], pose)
+                if arc:
+                    frame['arc'] = arc
+            frames.append(frame)
     return frames
 
 
@@ -229,6 +270,15 @@ def build_payload(data, territory_mm_override=None):
     territories = [tuple(t) for t in policy.get('territories', [focus])]
     if focus not in territories:
         territories.append(focus)
+    # A free-roaming policy (e.g. the wall follower) crosses territory edges, so
+    # the bounded metadata above doesn't cover where it actually went. Add every
+    # territory the path passes through -- matching the live dashboard's
+    # resolve_live_cells -- so the robot never drives off the drawn grid.
+    for run in runs:
+        for pose in run.get('path', []):
+            entered = _live_territory(float(pose[0]), float(pose[1]), territory_mm)
+            if entered not in territories:
+                territories.append(entered)
 
     wall_segments = inferred_wall_segments(walls, max_distance=grid_mm)
     # An inferred segment is "discovered" once both of its endpoint walls are.

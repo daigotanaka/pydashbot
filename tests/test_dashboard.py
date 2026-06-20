@@ -92,6 +92,54 @@ class DashboardTests(unittest.TestCase):
         export = dashboard.export_payload(payload)
         self.assertEqual(export["frames"][-1]["arc"], {"radius_mm": 100, "angle_deg": 90})
 
+    def test_arc_from_poses_reconstructs_curve_and_ignores_straight_legs(self):
+        # A quarter circle of radius 100 from origin facing +x ends at
+        # (100, 100) facing +90; the chord + sweep recover radius and angle.
+        arc = dashboard.arc_from_poses([0, 0, 0], [100, 100, 90])
+        self.assertIsNotNone(arc)
+        self.assertAlmostEqual(arc["radius_mm"], 100.0, places=1)
+        self.assertAlmostEqual(arc["angle_deg"], 90.0, places=1)
+        # A straight forward leg (no rotation) and an in-place turn (no travel)
+        # are not arcs.
+        self.assertIsNone(dashboard.arc_from_poses([0, 0, 0], [500, 0, 0]))
+        self.assertIsNone(dashboard.arc_from_poses([0, 0, 0], [0, 0, 90]))
+
+    def test_import_draws_arc_legs_and_grows_territories_along_the_path(self):
+        # A free-roaming run with no bounded-territory metadata: it drives
+        # straight north across two territory edges, then sweeps a quarter arc.
+        data = {
+            "schema_version": 2,
+            "runs": [
+                {
+                    "status": "partial",
+                    "path": [
+                        [310, 310, 90],
+                        [310, 1500, 90],  # enters (0,1)
+                        [310, 2500, 90],  # enters (0,2)
+                        [410, 2600, 180],  # a curved leg (travels and rotates)
+                    ],
+                    "walls": [],
+                    "obstacles": [],
+                    "events": [],
+                    "wall_follower": {
+                        "radius_mm": 250,
+                        "arc_deg": 360,
+                        "wall_on_left": True,
+                    },
+                }
+            ],
+        }
+
+        payload = dashboard.build_payload(data)
+
+        # Territories the path enters are all drawn, not just the start one.
+        territories = {tuple(t) for t in payload["territories"]}
+        self.assertEqual(territories, {(0, 0), (0, 1), (0, 2)})
+        # The straight legs carry no arc; the curved final leg does.
+        self.assertNotIn("arc", payload["frames"][1])
+        self.assertNotIn("arc", payload["frames"][2])
+        self.assertIn("arc", payload["frames"][3])
+
     def test_amend_last_move_corrects_pose_and_adds_walls(self):
         payload = dashboard.empty_payload(territory_mm=1000)
         dashboard.apply_live_move(payload, {"pose": [125, 125, 0]})
