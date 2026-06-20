@@ -66,3 +66,28 @@ class ExplorationPolicy(ABC):
     def metadata(self):
         """Per-run metadata recorded in the map JSON."""
         return {}
+
+
+# Command policies emit an explicit move/turn course (see preset_exploration);
+# they are a separate family from the heading policies above, registered here so
+# load_exploration_policy can resolve a config by name.
+try:
+    from apps.map.policies.preset_exploration import PresetExplorationPolicy
+except ModuleNotFoundError:
+    from policies.preset_exploration import PresetExplorationPolicy
+
+
+COMMAND_POLICIES = {
+    PresetExplorationPolicy.name: PresetExplorationPolicy,
+}
+
+
+def load_exploration_policy(configs):
+    """Load the first configured command policy, which has command priority."""
+    if not configs:
+        return None
+    config = configs[0]
+    policy_type = COMMAND_POLICIES.get(config['name'])
+    if policy_type is None:
+        raise ValueError(f"unknown exploration policy: {config['name']}")
+    return policy_type.from_config(config)

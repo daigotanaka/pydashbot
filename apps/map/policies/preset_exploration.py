@@ -1,4 +1,8 @@
-"""Command-producing policies for controlled mapping experiments."""
+"""Preset command policy: replay a fixed move/turn course from JSON.
+
+Unlike the heading policies (ExplorationPolicy subclasses), a command policy
+emits an explicit sequence of move/turn commands the run drives verbatim.
+"""
 
 import json
 from pathlib import Path
@@ -77,19 +81,3 @@ def validate_preset_command(command):
     if name == 'move':
         validated['stop_at_obstacle'] = stop_at_obstacle
     return validated
-
-
-EXPLORATION_POLICIES = {
-    PresetExplorationPolicy.name: PresetExplorationPolicy,
-}
-
-
-def load_exploration_policy(configs):
-    """Load the first configured policy, which has command priority."""
-    if not configs:
-        return None
-    config = configs[0]
-    policy_type = EXPLORATION_POLICIES.get(config['name'])
-    if policy_type is None:
-        raise ValueError(f"unknown exploration policy: {config['name']}")
-    return policy_type.from_config(config)

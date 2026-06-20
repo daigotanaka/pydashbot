@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from apps.map import calibrate
 from apps.map.policies import conservative_exploration as conservative
-from apps.map.policies import exploration_policies
+from apps.map.policies import exploration_policy_base
 from apps.map import main as map_room
 from apps.map.policies.novelty_exploration import NoveltyExplorationPolicy
 
@@ -417,7 +417,7 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertNotIn((500.0, 0.0), path)
 
     def test_preset_course_visits_expected_cells_and_ends_in_cell_zero_two(self):
-        policy = exploration_policies.load_exploration_policy(
+        policy = exploration_policy_base.load_exploration_policy(
             [
                 {"name": "preset", "input_file": str(FIXTURES / "course.json")},
                 {"name": "lower-priority-policy"},

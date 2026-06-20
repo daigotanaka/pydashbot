@@ -39,7 +39,7 @@ try:
         inferred_wall_segments,
         point_segment_distance,
     )
-    from apps.map.policies.exploration_policies import load_exploration_policy
+    from apps.map.policies.exploration_policy_base import load_exploration_policy
     from apps.map.strategies.go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
@@ -61,7 +61,7 @@ except ModuleNotFoundError:
         inferred_wall_segments,
         point_segment_distance,
     )
-    from policies.exploration_policies import load_exploration_policy
+    from policies.exploration_policy_base import load_exploration_policy
     from strategies.go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
