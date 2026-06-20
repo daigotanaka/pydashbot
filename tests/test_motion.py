@@ -273,5 +273,53 @@ class ObstacleAwareMoveTests(unittest.IsolatedAsyncioTestCase):
         robot.say.assert_not_awaited()
 
 
+class ArcTests(unittest.IsolatedAsyncioTestCase):
+    def make_robot(self):
+        robot = DashRobot.__new__(DashRobot)
+        robot.command = AsyncMock()
+        return robot
+
+    def test_arc_relative_pose_geometry(self):
+        from dash.core.motion import arc_relative_pose
+
+        # 90 deg left arc of radius 100 ends at (100, 100) facing +90.
+        x, y, t = arc_relative_pose(100, 90)
+        self.assertAlmostEqual(x, 100)
+        self.assertAlmostEqual(y, 100)
+        self.assertEqual(t, 90)
+        # Mirror image to the right.
+        x, y, t = arc_relative_pose(100, -90)
+        self.assertAlmostEqual(x, 100)
+        self.assertAlmostEqual(y, -100)
+        self.assertEqual(t, -90)
+        # A 180 deg arc doubles back to (0, 2R).
+        x, y, t = arc_relative_pose(100, 180)
+        self.assertAlmostEqual(x, 0, places=6)
+        self.assertAlmostEqual(y, 200)
+        # No sweep is no motion.
+        self.assertEqual(arc_relative_pose(100, 0), (0.0, 0.0, 0.0))
+
+    async def test_arc_sends_pose_with_forward_and_lateral_displacement(self):
+        from dash.core.motion import ARC_SPEED_MMPS
+
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()) as sleep:
+            robot = self.make_robot()
+            outcome = await robot.arc(100, 90)  # quarter circle, R=100, left
+
+        method, packet = robot.command.await_args.args
+        self.assertEqual(method, "pose")
+        # Unlike a plain move, the packet carries BOTH a forward (x) and a
+        # lateral (y) component -- that is what makes it an arc.
+        x_field = packet[0] | ((packet[5] & 0x3F) << 8)
+        y_field = packet[1] | ((packet[6] & 0x3F) << 8)
+        self.assertEqual(x_field, 100)  # x_mm = 100 -> 10 cm * 10
+        self.assertEqual(y_field, 100)  # y_mm = 100
+        # Duration is timed off the arc length (R * phi) at the arc speed.
+        self.assertAlmostEqual(
+            sleep.await_args.args[0], (100 * math.pi / 2) / ARC_SPEED_MMPS
+        )
+        self.assertEqual(outcome["rel_pose_mm"], [100.0, 100.0, 90.0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,8 +2,15 @@
 
 import asyncio
 import logging
+import math
 
-from dash.core.actuators import compensate_turn, encode_move
+from dash.core.actuators import (
+    PoseDirection,
+    PoseMode,
+    compensate_turn,
+    encode_move,
+    encode_pose,
+)
 
 PROXIMITY_STOP_THRESHOLD = 15
 PROXIMITY_CONFIRM_COUNT = 3
@@ -26,6 +33,25 @@ TURN_STALL_YAW_COUNTS = 12     # below this, the gyro registered no rotation
 # a 10-bit magnitude field, so it rolls over at 1024 centiradians (~587 deg);
 # we cap just below that to keep the firmware seeing the angle we commanded.
 MAX_TURN_DEGREES = 585
+
+# Default tangential speed for arc moves (mm/s).
+ARC_SPEED_MMPS = 150
+
+
+def arc_relative_pose(radius_mm, angle_deg):
+    """Relative end pose of a circular arc.
+
+    Returns ``(x_mm, y_mm, theta_deg)`` for following a circle of radius
+    ``radius_mm`` while the heading sweeps ``angle_deg`` -- ``x`` forward, ``y``
+    lateral (left positive), ``theta`` the heading change. Positive
+    ``angle_deg`` curves left (CCW), negative curves right. A 90 deg left arc of
+    radius R ends at (R, R) facing +90 deg; a 180 deg arc ends at (0, 2R).
+    """
+    radius_mm = abs(radius_mm)
+    phi = math.radians(angle_deg)
+    x_mm = radius_mm * math.sin(abs(phi))
+    y_mm = math.copysign(radius_mm * (1.0 - math.cos(phi)), angle_deg)
+    return (x_mm, y_mm, float(angle_deg))
 
 
 def to_packet_int(value, name):
@@ -103,6 +129,55 @@ class MotionController:
             "yaw_delta": yaw_delta,
             "left_wheel_delta": left_delta,
             "right_wheel_delta": right_delta,
+        }
+
+    async def arc(
+        self,
+        radius_mm,
+        angle_deg,
+        speed_mmps=ARC_SPEED_MMPS,
+        direction=PoseDirection.FORWARD,
+        ease=True,
+    ):
+        """Drive a smooth circular arc of ``radius_mm`` sweeping ``angle_deg``.
+
+        Unlike move()/turn(), which only write distance *or* in-place rotation,
+        this uses the firmware's native pose command (id 0x23 -- the same one,
+        but carrying forward, lateral, and rotation together), so the path is a
+        single continuous curve rather than a move-then-turn. Positive
+        ``angle_deg`` curves left (CCW); negative curves right. ``ease`` ramps
+        speed at the ends for a smooth start/stop. Returns the commanded
+        relative pose so a caller can reconcile it against odometry.
+
+        Conventions to confirm on hardware: encode_pose treats x/y as cm (it
+        multiplies by 10 to match the mm field move() writes), and the left/CCW
+        sign of ``angle_deg``/``y`` follows the math frame -- flip them here if
+        the robot curves the wrong way or mirrors the turn.
+        """
+        x_mm, y_mm, theta_deg = arc_relative_pose(radius_mm, angle_deg)
+        arc_length_mm = abs(radius_mm) * abs(math.radians(angle_deg))
+        seconds = arc_length_mm / max(1.0, abs(speed_mmps))
+        await self.command(
+            "pose",
+            encode_pose(
+                x_mm / 10.0,
+                y_mm / 10.0,
+                math.radians(angle_deg),
+                seconds,
+                mode=PoseMode.RELATIVE_MEASURED,
+                direction=direction,
+                wrap_theta=True,
+                ease=ease,
+            ),
+        )
+        await asyncio.sleep(seconds)
+        return {
+            "halt": "completed",
+            "monitored": False,
+            "radius_mm": abs(radius_mm),
+            "angle_deg": angle_deg,
+            "rel_pose_mm": [round(x_mm, 1), round(y_mm, 1), round(theta_deg, 1)],
+            "seconds": round(seconds, 3),
         }
 
     async def move(
