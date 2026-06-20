@@ -1530,6 +1530,18 @@ class _ExplorationRun:
         seconds = self._leg_seconds(event)
         if seconds is not None:
             move['duration'] = round(seconds, 3)
+        if event and event.get('action') == 'arc':
+            # The measured arc geometry so the dashboard draws the leg as a curve
+            # (map-frame swept angle = -gyro heading change; radius = arc length /
+            # swept). The straight-leg fields above still place the end pose.
+            swept = -float(event.get('heading_delta', 0.0) or 0.0)
+            arc_length = abs(float(event.get('distance_mm', 0.0) or 0.0))
+            swept_rad = math.radians(swept)
+            radius = arc_length / abs(swept_rad) if abs(swept_rad) > 1e-6 else 0.0
+            move['arc'] = {
+                'radius_mm': round(radius, 1),
+                'angle_deg': round(swept, 2),
+            }
         new_walls = self.walls[self._published_walls:]
         new_obstacles = self.obstacles[self._published_obstacles:]
         if new_walls:

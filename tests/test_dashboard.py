@@ -75,6 +75,23 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(visited_first, 1)
         self.assertGreater(visited_last, visited_first)
 
+    def test_arc_geometry_rides_on_the_frame_and_into_the_export(self):
+        payload = dashboard.empty_payload(territory_mm=1000)
+        dashboard.apply_live_move(payload, {"pose": [0, 0, 0]})
+        # Predicted arc endpoint carries no arc; the amend reveals the measured
+        # curve geometry.
+        dashboard.apply_live_move(payload, {"pose": [100, 100, 90]})
+        self.assertNotIn("arc", payload["frames"][-1])
+        dashboard.amend_last_move(
+            payload,
+            {"pose": [100, 100, 90], "arc": {"radius_mm": 100, "angle_deg": 90}},
+        )
+        self.assertEqual(payload["frames"][-1]["arc"], {"radius_mm": 100, "angle_deg": 90})
+
+        # The standalone-animation export preserves the arc geometry.
+        export = dashboard.export_payload(payload)
+        self.assertEqual(export["frames"][-1]["arc"], {"radius_mm": 100, "angle_deg": 90})
+
     def test_amend_last_move_corrects_pose_and_adds_walls(self):
         payload = dashboard.empty_payload(territory_mm=1000)
         dashboard.apply_live_move(payload, {"pose": [125, 125, 0]})

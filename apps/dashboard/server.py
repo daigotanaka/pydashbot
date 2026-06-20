@@ -325,7 +325,7 @@ def frame_from_move(move, index):
     x = float(pose[0])
     y = float(pose[1])
     heading = float(pose[2]) if len(pose) > 2 and pose[2] is not None else 0.0
-    return {
+    frame = {
         'run': int(move.get('run', 0)),
         'node': int(move.get('node', index)),
         'timestamp': str(move.get('timestamp', '')),
@@ -334,6 +334,11 @@ def frame_from_move(move, index):
         'heading': round(heading, 2),
         'cells': {},
     }
+    # An arc leg carries its curve geometry so the client draws it as an arc
+    # (from the previous frame) rather than a straight chord.
+    if isinstance(move.get('arc'), dict):
+        frame['arc'] = move['arc']
+    return frame
 
 
 def _live_territory(x, y, territory_mm):
@@ -501,6 +506,9 @@ def amend_last_move(payload, move):
         payload['path'][-1] = [frame['x'], frame['y']]
     if move.get('duration') is not None and payload['durations']:
         payload['durations'][-1] = round(float(move['duration']), 3)
+    # An amend reveals the measured curve geometry for an arc leg.
+    if isinstance(move.get('arc'), dict):
+        frame['arc'] = move['arc']
     index = len(payload['frames']) - 1
     for name in ('walls', 'obstacles'):
         for point in move.get(name, []):
@@ -1229,11 +1237,31 @@ function lerpAngle(a, b, t) {
   return a + d * t;
 }
 
+// Pose+heading at fraction `t` along an arc leg starting from frame `prev`.
+// Mirrors the mapper's arc kinematics: a constant-radius curve, so the trail and
+// the moving avatar follow the actual arc instead of its straight chord.
+function arcPoint(prev, arc, t) {
+  const aRad = arc.angle_deg * Math.PI / 180;
+  if (Math.abs(aRad) < 1e-6) return [prev.x, prev.y, prev.heading];
+  const dth = aRad * t;
+  const r = arc.radius_mm * Math.sign(aRad);  // signed radius
+  const fwd = r * Math.sin(dth);
+  const lat = r * (1 - Math.cos(dth));
+  const h0 = prev.heading * Math.PI / 180;
+  const dx = fwd * Math.cos(h0) - lat * Math.sin(h0);
+  const dy = fwd * Math.sin(h0) + lat * Math.cos(h0);
+  return [prev.x + dx, prev.y + dy, prev.heading + arc.angle_deg * t];
+}
+
 function interpolatedPose() {
   const i = Math.min(frames.length - 1, Math.floor(pos));
   const j = Math.min(frames.length - 1, i + 1);
   const t = pos - i;
   const f0 = frames[i], f1 = frames[j];
+  if (j !== i && f1.arc) {
+    const p = arcPoint(f0, f1.arc, t);
+    return { x: p[0], y: p[1], heading: p[2], frame: f0, index: i };
+  }
   return {
     x: lerp(f0.x, f1.x, t),
     y: lerp(f0.y, f1.y, t),
@@ -1265,6 +1293,7 @@ function draw() {
   drawDockWalls();
   drawWallSegments(pose.index);
   drawPath(pose.index, frame.run);
+  drawArcArrows(pose.index);
   drawWalls(pose.index);
   drawCorner();
   drawRobot(pose);
@@ -1390,11 +1419,27 @@ function drawWallSegments(revealIndex) {
   ctx.setLineDash([]);
 }
 
+// Number of segments to approximate an arc leg with (~one per 12 deg).
+function arcSampleCount(arc) {
+  return Math.max(2, Math.round(Math.abs(arc.angle_deg) / 12));
+}
+
 function drawPath(uptoIndex, currentRun) {
-  // Draw the traversed path as a glowing trail up to the current frame.
-  const pts = [];
-  for (let k = 0; k <= uptoIndex && k < frames.length; k++) {
-    pts.push([frames[k].x, frames[k].y]);
+  // Draw the traversed path as a glowing trail up to the current frame, curving
+  // arc legs instead of cutting their chord.
+  if (uptoIndex < 0 || frames.length === 0) return;
+  const pts = [[frames[0].x, frames[0].y]];
+  for (let k = 1; k <= uptoIndex && k < frames.length; k++) {
+    const f = frames[k];
+    if (f.arc) {
+      const n = arcSampleCount(f.arc);
+      for (let s = 1; s <= n; s++) {
+        const p = arcPoint(frames[k - 1], f.arc, s / n);
+        pts.push([p[0], p[1]]);
+      }
+    } else {
+      pts.push([f.x, f.y]);
+    }
   }
   if (pts.length < 2) return;
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
@@ -1405,6 +1450,48 @@ function drawPath(uptoIndex, currentRun) {
   ctx.strokeStyle = 'rgba(111,179,255,0.9)';
   ctx.lineWidth = 2.2;
   strokePoly(pts);
+}
+
+// Overlay each arc leg with an amber curve + an arrowhead at its end, so arc
+// motion reads as a curved arrow distinct from straight legs.
+function drawArcArrows(uptoIndex) {
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  for (let k = 1; k <= uptoIndex && k < frames.length; k++) {
+    const f = frames[k];
+    if (!f.arc) continue;
+    const n = arcSampleCount(f.arc);
+    ctx.strokeStyle = 'rgba(242,201,76,0.95)';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.moveTo(TX(frames[k - 1].x, frames[k - 1].y), TY(frames[k - 1].x, frames[k - 1].y));
+    for (let s = 1; s <= n; s++) {
+      const p = arcPoint(frames[k - 1], f.arc, s / n);
+      ctx.lineTo(TX(p[0], p[1]), TY(p[0], p[1]));
+    }
+    ctx.stroke();
+    // Arrowhead at the arc midpoint, tangent to the curve -- shows the sweep
+    // direction without being hidden under the robot at the end.
+    const mid = arcPoint(frames[k - 1], f.arc, 0.5);
+    arrowHead(mid[0], mid[1], mid[2], 'rgba(242,201,76,0.95)');
+  }
+}
+
+// Filled triangle at world (wx, wy) pointing along map heading, carried through
+// the transpose/rotation like everything else.
+function arrowHead(wx, wy, headingDeg, color) {
+  const x = TX(wx, wy), y = TY(wx, wy);
+  const rad = headingDeg * Math.PI / 180;
+  const ax = TX(wx + Math.cos(rad), wy + Math.sin(rad));
+  const ay = TY(wx + Math.cos(rad), wy + Math.sin(rad));
+  const ang = Math.atan2(ay - y, ax - x);
+  const size = 9;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x - size * Math.cos(ang - 0.42), y - size * Math.sin(ang - 0.42));
+  ctx.lineTo(x - size * Math.cos(ang + 0.42), y - size * Math.sin(ang + 0.42));
+  ctx.closePath();
+  ctx.fill();
 }
 
 function strokePoly(pts) {
