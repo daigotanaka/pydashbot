@@ -320,6 +320,24 @@ class ArcTests(unittest.IsolatedAsyncioTestCase):
             sleep.await_args.args[0], (100 * math.pi / 2) / ARC_SPEED_MMPS
         )
         self.assertEqual(outcome["rel_pose_mm"], [100.0, 100.0, 90.0])
+        self.assertEqual(outcome["segments"], 1)
+
+    async def test_arc_splits_wide_sweeps_into_subarcs(self):
+        with patch("dash.core.motion.asyncio.sleep", new=AsyncMock()):
+            robot = self.make_robot()
+            outcome = await robot.arc(100, 180)  # half-circle -> two 90 deg arcs
+
+        # A single 180 deg arc's target is nearly pure-lateral and stalls; it is
+        # split into forward-dominant sub-arcs instead.
+        self.assertEqual(outcome["segments"], 2)
+        self.assertEqual(robot.command.await_count, 2)
+        for call in robot.command.await_args_list:
+            method, packet = call.args
+            self.assertEqual(method, "pose")
+            x_field = packet[0] | ((packet[5] & 0x3F) << 8)
+            self.assertEqual(x_field, 100)  # each sub-arc is a 90 deg, x=100
+        # The reported pose is still the full intended arc.
+        self.assertEqual(outcome["rel_pose_mm"][2], 180.0)
 
 
 if __name__ == "__main__":

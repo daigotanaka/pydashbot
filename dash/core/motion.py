@@ -36,6 +36,11 @@ MAX_TURN_DEGREES = 585
 
 # Default tangential speed for arc moves (mm/s).
 ARC_SPEED_MMPS = 150
+# Largest sweep sent as a single pose command. Past ~120 deg an arc's target
+# turns mostly lateral (x = R sin phi -> 0 at 180), which a differential-drive
+# robot can't reach in one move, so it stalls before finishing the curve.
+# Larger sweeps are split into this-sized forward-dominant sub-arcs.
+ARC_MAX_SEGMENT_DEG = 90
 
 
 def arc_relative_pose(radius_mm, angle_deg):
@@ -138,51 +143,61 @@ class MotionController:
         speed_mmps=ARC_SPEED_MMPS,
         direction=PoseDirection.FORWARD,
         ease=True,
+        max_segment_deg=ARC_MAX_SEGMENT_DEG,
     ):
         """Drive a smooth circular arc of ``radius_mm`` sweeping ``angle_deg``.
 
         Unlike move()/turn(), which only write distance *or* in-place rotation,
         this uses the firmware's native pose command (id 0x23 -- the same one,
         but carrying forward, lateral, and rotation together), so the path is a
-        single continuous curve rather than a move-then-turn. Positive
-        ``angle_deg`` curves left (CCW); negative curves right. ``ease`` ramps
-        speed at the ends for a smooth start/stop. Returns the commanded
-        relative pose so a caller can reconcile it against odometry.
+        continuous curve rather than a move-then-turn. Positive ``angle_deg``
+        curves left (CCW); negative curves right. ``ease`` ramps speed at the
+        ends for a smooth start/stop. Returns the intended relative pose so a
+        caller can reconcile it against odometry.
 
         Verified on hardware (radius 120 mm, +/-60 deg): the robot traces a real
-        curve in one move, x/y units are correct (encode_pose treats them as cm,
-        x10 to match move()'s mm field), and positive ``angle_deg`` curves left.
-        Like every Dash rotation it *under-rotates* (~15-20 deg of the sweep is
-        lost to the startup deadband) and the inner wheel barely turns, so the
-        gyro is the truth for heading -- reconcile this outcome against odometry
-        at a higher level. NOTE: deadband-compensating the swept angle (as
-        turn() does) did *not* reliably correct the arc heading on hardware, so
-        the requested angle is sent as-is.
+        curve, x/y units are correct (encode_pose treats them as cm, x10 to
+        match move()'s mm field), and positive ``angle_deg`` curves left. Like
+        every Dash rotation it *under-rotates* (~15-20 deg lost to the startup
+        deadband) and the inner wheel barely turns, so the gyro is the truth for
+        heading -- reconcile against odometry at a higher level. Deadband-
+        compensating the swept angle (as turn() does) did *not* reliably correct
+        it on hardware, so the requested angle is sent as-is.
+
+        Sweeps wider than ``max_segment_deg`` are split into that-sized sub-arcs
+        chained back to back; a single near-180 deg arc has an almost purely
+        lateral target a differential robot can't reach, so it stalls before
+        completing, whereas each forward-dominant sub-arc completes.
         """
+        segments = max(1, math.ceil(abs(float(angle_deg)) / max(1.0, max_segment_deg)))
+        segment_deg = float(angle_deg) / segments
+        segment_len_mm = abs(radius_mm) * abs(math.radians(segment_deg))
+        segment_seconds = segment_len_mm / max(1.0, abs(speed_mmps))
+        x_seg, y_seg, _ = arc_relative_pose(radius_mm, segment_deg)
+        for _ in range(segments):
+            await self.command(
+                "pose",
+                encode_pose(
+                    x_seg / 10.0,
+                    y_seg / 10.0,
+                    math.radians(segment_deg),
+                    segment_seconds,
+                    mode=PoseMode.RELATIVE_MEASURED,
+                    direction=direction,
+                    wrap_theta=True,
+                    ease=ease,
+                ),
+            )
+            await asyncio.sleep(segment_seconds)
         x_mm, y_mm, theta_deg = arc_relative_pose(radius_mm, angle_deg)
-        arc_length_mm = abs(radius_mm) * abs(math.radians(angle_deg))
-        seconds = arc_length_mm / max(1.0, abs(speed_mmps))
-        await self.command(
-            "pose",
-            encode_pose(
-                x_mm / 10.0,
-                y_mm / 10.0,
-                math.radians(angle_deg),
-                seconds,
-                mode=PoseMode.RELATIVE_MEASURED,
-                direction=direction,
-                wrap_theta=True,
-                ease=ease,
-            ),
-        )
-        await asyncio.sleep(seconds)
         return {
             "halt": "completed",
             "monitored": False,
             "radius_mm": abs(radius_mm),
             "angle_deg": float(angle_deg),
+            "segments": segments,
             "rel_pose_mm": [round(x_mm, 1), round(y_mm, 1), round(theta_deg, 1)],
-            "seconds": round(seconds, 3),
+            "seconds": round(segment_seconds * segments, 3),
         }
 
     async def move(
