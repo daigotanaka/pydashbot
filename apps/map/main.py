@@ -29,7 +29,6 @@ try:
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
-        territory_cell,
     )
     from apps.map.policies.coverage_exploration import CoverageExploration
     from apps.map.policies.novelty_exploration import NoveltyExplorationPolicy
@@ -39,7 +38,10 @@ try:
         inferred_wall_segments,
         point_segment_distance,
     )
-    from apps.map.policies.exploration_policy_base import load_exploration_policy
+    from apps.map.policies.exploration_policy_base import (
+        PolicyContext,
+        load_exploration_policy,
+    )
     from apps.map.strategies.go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
@@ -51,7 +53,6 @@ except ModuleNotFoundError:
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
-        territory_cell,
     )
     from policies.coverage_exploration import CoverageExploration
     from policies.novelty_exploration import NoveltyExplorationPolicy
@@ -61,7 +62,10 @@ except ModuleNotFoundError:
         inferred_wall_segments,
         point_segment_distance,
     )
-    from policies.exploration_policy_base import load_exploration_policy
+    from policies.exploration_policy_base import (
+        PolicyContext,
+        load_exploration_policy,
+    )
     from strategies.go_home_strategies import (
         DStarLiteStrategy,
         HardBlockedEdgeStrategy,
@@ -107,6 +111,11 @@ ODOMETRY_MAX_TURN_DISTANCE_MM = 150
 # (heading = (right - left) * mm_per_wheel_tick / track_width); see README.
 TRACK_WIDTH_MM = 87.0
 ODOMETRY_SLIP_HEADING_DEG = 45
+# Arc odometry: the outer-wheel arc length is capped at radius * |measured turn|
+# times this margin (the margin covers Dash arcing a little wider than commanded
+# due to under-rotation). Bounds a blocked arc's outer-wheel over-spin so the
+# pose can't teleport when the gyro shows little rotation.
+ARC_LENGTH_GYRO_MARGIN = 1.5
 COMMON_MODE_SLIP_MIN_DISTANCE_MM = 150
 COMMON_MODE_SLIP_FULL_REQUEST_RATIO = 0.9
 COMMON_MODE_SLIP_LEGACY_MAX_REQUEST_MM = 500
@@ -168,12 +177,14 @@ GO_HOME_STRATEGIES = {
     LEGACY_GO_HOME_STRATEGY.name: LEGACY_GO_HOME_STRATEGY,
 }
 # Heading policy selected by name in the config.
-# `novelty` is the unconstrained default base; `conservative` and `coverage`
-# are bounded-territory policies (subclasses of ConservativeExploration).
+# Named policies, each built via ``policy_class.from_context``. `novelty` is the
+# unconstrained base; `conservative` / `coverage` are bounded-territory; the
+# `wall-follower` is self-driving. The run treats them all the same.
 EXPLORATION_POLICIES = {
     'novelty': NoveltyExplorationPolicy,
     'conservative': ConservativeExploration,
     'coverage': CoverageExploration,
+    WallFollower.name: WallFollower,
 }
 DEFAULT_EXPLORATION_POLICY = 'conservative'
 MAPPING_CONFIG_KEYS = {
@@ -265,10 +276,10 @@ def apply_mapping_config(options, config, parser):
         options.territory_size = positive_mm(options.territory_size)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
-    if options.exploration_policy not in {*EXPLORATION_POLICIES, WallFollower.name}:
+    if options.exploration_policy not in EXPLORATION_POLICIES:
         parser.error(
             "config exploration_policy must be one of: "
-            f"{', '.join((*EXPLORATION_POLICIES, WallFollower.name))}"
+            f"{', '.join(EXPLORATION_POLICIES)}"
         )
 
 
@@ -1411,28 +1422,21 @@ class _ExplorationRun:
             ((0.0, 0.0), (sign_x * dock_wall_length, 0.0)),  # side wall (y=0)
         ]
         self.exploration_policy = exploration_policy
-        # There is always a policy, selected by name. Bounded-territory policies
-        # (subclasses of ConservativeExploration) take the territory state;
-        # the unconstrained novelty default takes only the live path. The
-        # wall-follower drives itself (policies.wall_follower.WallFollower), but
-        # still runs a Conservative policy passively so the saved map keeps
-        # territory metadata.
+        # Build the named policy from a uniform context; each policy reads only
+        # the fields it needs (see ExplorationPolicy.from_context), so the run
+        # holds no per-policy construction logic.
         policy_class = EXPLORATION_POLICIES.get(
             exploration_policy, ConservativeExploration
         )
-        if issubclass(policy_class, ConservativeExploration):
-            self.policy = policy_class(
-                accepted_runs(strategy_map or {}),
-                (self.x, self.y),
-                self.known_path,
-                self.known_blockers,
-                self.known_wall_segments,
-                territory_mm,
-            )
-        else:
-            self.policy = policy_class(
-                self.known_path, STRATEGY_SAMPLE_DISTANCES
-            )
+        self.policy = policy_class.from_context(PolicyContext(
+            known_path=self.known_path,
+            start_xy=(self.x, self.y),
+            accepted_runs=accepted_runs(strategy_map or {}),
+            known_blockers=self.known_blockers,
+            known_wall_segments=self.known_wall_segments,
+            territory_mm=territory_mm,
+            sample_distances=STRATEGY_SAMPLE_DISTANCES,
+        ))
         # Prime the dashboard with prior-run coverage and blockers (resume
         # only) before the live frames start, so already-mapped visited /
         # blocked / unreachable cells show from the first pose.
@@ -1689,27 +1693,28 @@ class _ExplorationRun:
         if sounds:
             send_command('say', random.choice(sounds))
         if back_away:
-            self.predict_dashboard_pose('reverse', BACK_AWAY_MM)
-            send_command('move', -BACK_AWAY_MM, BACK_AWAY_SPEED_MMPS)
-            self.update_pose('reverse', BACK_AWAY_MM)
-            self.amend_dashboard_pose()
+            self.back_away()
         self.turn_toward_knowledge(reason, left, right, require_turn=True)
         send_command('say', random.choice(RESUME_SOUNDS))
         send_command('neck_color', '#00ff00')
 
+    def back_away(self, distance_mm=BACK_AWAY_MM):
+        """Reverse a short distance (integrating the pose) to unwedge from a
+        wall/obstacle the robot is pressed against."""
+        self.predict_dashboard_pose('reverse', distance_mm)
+        send_command('move', -distance_mm, BACK_AWAY_SPEED_MMPS)
+        self.update_pose('reverse', distance_mm)
+        self.amend_dashboard_pose()
+
     # -- observations ------------------------------------------------------
     def reject_blocked_territory_transition(self, previous_position, known_path_len):
         """Discard translation into another territory when the leg was blocked."""
-        if not isinstance(self.policy, ConservativeExploration):
-            return False
-        previous_territory = territory_cell(
-            previous_position[0], previous_position[1], self.policy.territory_mm
+        crossing = self.policy.blocked_territory_crossing(
+            previous_position, (self.x, self.y)
         )
-        current_territory = territory_cell(
-            self.x, self.y, self.policy.territory_mm
-        )
-        if current_territory == previous_territory:
+        if crossing is None:
             return False
+        previous_territory, current_territory = crossing
 
         self.x, self.y = previous_position
         self.path[-1] = (self.x, self.y, self.heading)
@@ -1781,12 +1786,8 @@ class _ExplorationRun:
         )
         if correction:
             dx, dy, target, mismatch = correction
-            if (
-                isinstance(self.policy, ConservativeExploration)
-                and territory_cell(
-                    self.x + dx, self.y + dy, self.policy.territory_mm
-                )
-                != territory_cell(self.x, self.y, self.policy.territory_mm)
+            if self.policy.revisit_crosses_territory(
+                (self.x, self.y), (self.x + dx, self.y + dy)
             ):
                 correction = None
         if correction:
@@ -2049,13 +2050,20 @@ class _ExplorationRun:
                 self.redirect(reason, sounds, back_away, left, right)
 
     # -- wall follower -----------------------------------------------------
-    def update_pose_arc(self, requested_angle_deg, arc_outcome=None):
+    def update_pose_arc(self, radius_mm, requested_angle_deg, arc_outcome=None):
         """Integrate an arc leg into the pose with curved kinematics.
 
         Heading change comes from the gyro (reliable for the partial arcs the
         wall follower drives, below its ~155 deg wrap); arc length from the
         *outer* wheel (the inner one slips on an arc):
         ``s = outer_travel - (track/2) * |dtheta|``.
+
+        Slip guard: an arc blocked against a wall spins the outer wheel in place,
+        so the raw outer travel can be far larger than the robot actually moved.
+        The geometry bounds it -- with radius R and a measured turn ``dtheta`` the
+        arc can be at most ``R * |dtheta|`` long -- so cap the outer estimate by
+        that (with margin), which collapses toward zero when the gyro shows no
+        rotation and stops the pose from teleporting.
         """
         yaw_now = read_settled('get_yaw')
         left_now = read_settled('get_left_wheel')
@@ -2067,10 +2075,11 @@ class _ExplorationRun:
         # Map frame mirrors the gyro handedness (see update_pose).
         heading_delta_phys = d_yaw * self.deg_per_yaw
         dtheta_map = -heading_delta_phys
+        dtheta_rad = abs(math.radians(dtheta_map))
         outer_mm = max(abs(left_delta), abs(right_delta)) * self.mm_per_wd
-        arc_len = max(
-            0.0, outer_mm - (TRACK_WIDTH_MM / 2.0) * abs(math.radians(dtheta_map))
-        )
+        outer_estimate = max(0.0, outer_mm - (TRACK_WIDTH_MM / 2.0) * dtheta_rad)
+        gyro_bound = abs(radius_mm) * dtheta_rad * ARC_LENGTH_GYRO_MARGIN
+        arc_len = min(outer_estimate, gyro_bound)
         previous = (self.x, self.y)
         dx, dy, new_heading = arc_pose_delta(self.heading, dtheta_map, arc_len)
         self.x += dx
@@ -2125,7 +2134,7 @@ class _ExplorationRun:
         )
         self._dashboard_pending = True
         outcome = send_command('arc', radius_mm, angle_deg)['result']
-        self.update_pose_arc(angle_deg, outcome)
+        self.update_pose_arc(radius_mm, angle_deg, outcome)
         if outcome.get('halt') == 'obstacle':
             self.mark_ahead(self.walls, self.known_walls, WALL_OFFSET_MM)
             self.known_wall_segments[:] = inferred_wall_segments(
@@ -2226,18 +2235,11 @@ def explore(
         dashboard,
     )
     run.announce()
-    if not command_policy:
-        if exploration_policy != WallFollower.name:
-            run.turn_toward_knowledge('initial strategy')
-        end_time = time.time() + duration
-
     try:
         if command_policy:
             run.drive_preset_course()
-        elif exploration_policy == WallFollower.name:
-            WallFollower().follow(run, end_time)
         else:
-            run.explore_until(end_time)
+            run.policy.drive(run, duration)
     except KeyboardInterrupt:
         print('\nInterrupted.')
     finally:

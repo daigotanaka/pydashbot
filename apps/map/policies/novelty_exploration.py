@@ -24,6 +24,10 @@ class NoveltyExplorationPolicy(ExplorationPolicy):
         self.path_points = path_points
         self.sample_distances = sample_distances
 
+    @classmethod
+    def from_context(cls, context):
+        return cls(context.known_path, context.sample_distances)
+
     def heading_preference(self, x, y, heading):
         hr = math.radians(heading)
         ux, uy = math.cos(hr), math.sin(hr)

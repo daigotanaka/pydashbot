@@ -49,10 +49,12 @@ class FakeRun:
     def __init__(self, forward_results, arc_results, wall_segments):
         self.quality = {'tracking_lost': False}
         self.x, self.y = 50.0, -10.0
+        self.heading = 0.0
         self.known_wall_segments = wall_segments
         self._forward = iter(forward_results)
         self._arcs = iter(arc_results)
         self.forward_calls = 0
+        self.back_away_calls = 0
         self.turns = []
         self.arcs = []
 
@@ -69,6 +71,9 @@ class FakeRun:
     def arc_leg(self, radius_mm, angle_deg):
         self.arcs.append((radius_mm, angle_deg))
         return next(self._arcs)
+
+    def back_away(self, distance_mm=200):
+        self.back_away_calls += 1
 
 
 class WallFollowerLoopTests(unittest.TestCase):
@@ -102,6 +107,43 @@ class WallFollowerLoopTests(unittest.TestCase):
         # Wall on the left -> arc clockwise (negative command angle).
         self.assertTrue(all(angle < 0 for _radius, angle in run.arcs))
         self.assertEqual(run.forward_calls, 2)
+
+    def test_follow_escapes_a_corner_after_repeated_no_progress_arcs(self):
+        wall = [((0.0, 0.0), (100.0, 0.0))]
+        run = FakeRun(
+            forward_results=[True],  # find a wall once, then time out
+            arc_results=[
+                {'halt': 'obstacle', 'completed_angle_deg': 3, 'completed_fraction': 0.01},
+                {'halt': 'obstacle', 'completed_angle_deg': 4, 'completed_fraction': 0.012},
+            ],
+            wall_segments=wall,
+        )
+        WallFollower().follow(run, time.time() + 100)
+
+        # Two no-progress arcs in a row trip the wedge guard: back off once and
+        # break out to driving forward (which then times out and ends the run).
+        self.assertEqual(len(run.arcs), 2)
+        self.assertEqual(run.back_away_calls, 1)
+        self.assertEqual(run.forward_calls, 2)
+
+    def test_a_productive_arc_resets_the_wedge_counter(self):
+        wall = [((0.0, 0.0), (100.0, 0.0))]
+        run = FakeRun(
+            forward_results=[True],
+            arc_results=[
+                {'halt': 'obstacle', 'completed_angle_deg': 3, 'completed_fraction': 0.01},
+                {'halt': 'obstacle', 'completed_angle_deg': 40, 'completed_fraction': 0.4},
+                {'halt': 'obstacle', 'completed_angle_deg': 3, 'completed_fraction': 0.01},
+                {'halt': 'completed', 'completed_angle_deg': 360, 'completed_fraction': 1.0},
+            ],
+            wall_segments=wall,
+        )
+        WallFollower().follow(run, time.time() + 100)
+
+        # Single stalls separated by a productive arc never reach the limit, so
+        # the robot keeps following instead of escaping.
+        self.assertEqual(run.back_away_calls, 0)
+        self.assertEqual(len(run.arcs), 4)
 
     def test_follow_stops_when_tracking_is_lost(self):
         run = FakeRun([True], [], [((0.0, 0.0), (100.0, 0.0))])

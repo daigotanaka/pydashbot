@@ -214,6 +214,30 @@ class ConservativeExploration(ExplorationPolicy):
             )
         }
 
+    @classmethod
+    def from_context(cls, context):
+        return cls(
+            context.accepted_runs,
+            context.start_xy,
+            context.known_path,
+            context.known_blockers,
+            context.known_wall_segments,
+            context.territory_mm,
+        )
+
+    def blocked_territory_crossing(self, previous_xy, current_xy):
+        previous_cell = territory_cell(previous_xy[0], previous_xy[1], self.territory_mm)
+        current_cell = territory_cell(current_xy[0], current_xy[1], self.territory_mm)
+        if current_cell == previous_cell:
+            return None
+        return previous_cell, current_cell
+
+    def revisit_crosses_territory(self, current_xy, corrected_xy):
+        return (
+            territory_cell(current_xy[0], current_xy[1], self.territory_mm)
+            != territory_cell(corrected_xy[0], corrected_xy[1], self.territory_mm)
+        )
+
     def allows_point(self, x, y):
         return territory_cell(x, y, self.territory_mm) in set(self.territories)
 
