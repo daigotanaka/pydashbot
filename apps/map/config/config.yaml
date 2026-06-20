@@ -1,10 +1,11 @@
 map_file: data/room_map.json
 calibration: data/calibration/calibration_20260613-18-39-49.json
 duration_seconds: 60
-# Heading policy (selected by name):
-# - conservative : bounded territories, frontier-alignment objective
-# - coverage     : bounded territories, maximize newly-visited cells per leg
-# - novelty      : no territory limit, head toward unexplored space
+# Exploration policy (selected by name):
+# - conservative  : bounded territories, frontier-alignment objective
+# - coverage      : bounded territories, maximize newly-visited cells per leg
+# - novelty       : no territory limit, head toward unexplored space
+# - wall-follower : arc-based; drive to a wall, then hug it with arcs
 exploration_policy: coverage
 territory_size_mm: 1000
 

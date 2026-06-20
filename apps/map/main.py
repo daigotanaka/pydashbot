@@ -174,6 +174,18 @@ EXPLORATION_POLICIES = {
     'coverage': CoverageExploration,
 }
 DEFAULT_EXPLORATION_POLICY = 'conservative'
+
+# Arc-based wall follower (a distinct driving loop, not a heading policy): drive
+# to a wall, face along it, then arc around it, re-facing each time the arc stops
+# on the wall ahead. Still tracks territories for the map via a Conservative
+# exploration policy running passively alongside.
+WALL_FOLLOWER = 'wall-follower'
+WALL_FOLLOW_RADIUS_MM = 250
+WALL_FOLLOW_ARC_DEG = 360
+WALL_FOLLOW_ON_LEFT = True  # keep the wall on the left -> arc clockwise (CW)
+# Treat an arc that swept at least this fraction of the full circle as "no wall
+# encountered" (open space): drive forward to find a wall again.
+WALL_FOLLOW_OPEN_FRACTION = 0.95
 MAPPING_CONFIG_KEYS = {
     'map_file',
     'calibration',
@@ -263,10 +275,10 @@ def apply_mapping_config(options, config, parser):
         options.territory_size = positive_mm(options.territory_size)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
-    if options.exploration_policy not in EXPLORATION_POLICIES:
+    if options.exploration_policy not in {*EXPLORATION_POLICIES, WALL_FOLLOWER}:
         parser.error(
             "config exploration_policy must be one of: "
-            f"{', '.join(EXPLORATION_POLICIES)}"
+            f"{', '.join((*EXPLORATION_POLICIES, WALL_FOLLOWER))}"
         )
 
 
@@ -407,6 +419,59 @@ def angle_delta(target, current):
 def normalize_heading(heading):
     """Normalize a heading to [-180, 180)."""
     return (heading + 180) % 360 - 180
+
+
+def arc_pose_delta(start_heading_deg, dtheta_deg, arc_length_mm):
+    """World-frame ``(dx, dy, new_heading_deg)`` for a constant-radius arc.
+
+    The robot starts at ``start_heading_deg`` and sweeps ``dtheta_deg`` (map
+    frame, +CCW) while travelling ``arc_length_mm`` along the curve. Integrates
+    the curved path exactly -- a plain move()/turn() can't, which is why arc
+    odometry needs this -- and reduces to a straight step as ``dtheta -> 0``.
+    """
+    h0 = math.radians(start_heading_deg)
+    dth = math.radians(dtheta_deg)
+    if abs(dth) < 1e-6:
+        forward, lateral = arc_length_mm, 0.0
+    else:
+        radius = arc_length_mm / dth
+        forward = radius * math.sin(dth)
+        lateral = radius * (1.0 - math.cos(dth))
+    dx = forward * math.cos(h0) - lateral * math.sin(h0)
+    dy = forward * math.sin(h0) + lateral * math.cos(h0)
+    return dx, dy, normalize_heading(start_heading_deg + dtheta_deg)
+
+
+def nearest_point_on_segment(point, segment):
+    """Closest point on a line segment to ``point`` (all (x, y) tuples)."""
+    (ax, ay), (bx, by) = segment
+    tx, ty = bx - ax, by - ay
+    length_sq = tx * tx + ty * ty
+    if length_sq == 0:
+        return (ax, ay)
+    s = ((point[0] - ax) * tx + (point[1] - ay) * ty) / length_sq
+    s = max(0.0, min(1.0, s))
+    return (ax + s * tx, ay + s * ty)
+
+
+def wall_follow_heading(robot_xy, segment, wall_on_left=True):
+    """Heading (deg) to run tangent to ``segment`` with the wall on one side.
+
+    Of the wall's two tangent directions, pick the one that keeps the wall on
+    the robot's left (or right). Used to ``face against the wall with the best
+    of knowledge`` -- ``segment`` is the nearest inferred wall segment.
+    """
+    (ax, ay), (bx, by) = segment
+    theta = math.atan2(by - ay, bx - ax)
+    near = nearest_point_on_segment(robot_xy, segment)
+    to_wall = (near[0] - robot_xy[0], near[1] - robot_xy[1])
+    # Left normal of `theta`; if the wall does not lie on the requested side,
+    # flip to the opposite tangent direction.
+    left_normal = (-math.sin(theta), math.cos(theta))
+    on_left = to_wall[0] * left_normal[0] + to_wall[1] * left_normal[1] > 0
+    if on_left != wall_on_left:
+        theta += math.pi
+    return normalize_heading(math.degrees(theta))
 
 
 def tracked_turn_steps(degrees):
@@ -1408,10 +1473,15 @@ class _ExplorationRun:
             ((0.0, 0.0), (0.0, sign_y * dock_wall_length)),  # rear wall (x=0)
             ((0.0, 0.0), (sign_x * dock_wall_length, 0.0)),  # side wall (y=0)
         ]
+        self.exploration_policy = exploration_policy
         # There is always a policy, selected by name. Bounded-territory policies
         # (subclasses of ConservativeExploration) take the territory state;
-        # the unconstrained novelty default takes only the live path.
-        policy_class = EXPLORATION_POLICIES[exploration_policy]
+        # the unconstrained novelty default takes only the live path. The
+        # wall-follower drives itself (follow_walls), but still runs a
+        # Conservative policy passively so the saved map keeps territory metadata.
+        policy_class = EXPLORATION_POLICIES.get(
+            exploration_policy, ConservativeExploration
+        )
         if issubclass(policy_class, ConservativeExploration):
             self.policy = policy_class(
                 accepted_runs(strategy_map or {}),
@@ -2028,6 +2098,164 @@ class _ExplorationRun:
             ):
                 self.redirect(reason, sounds, back_away, left, right)
 
+    # -- wall follower -----------------------------------------------------
+    def update_pose_arc(self, requested_angle_deg, arc_outcome=None):
+        """Integrate an arc leg into the pose with curved kinematics.
+
+        Heading change comes from the gyro (reliable for the partial arcs the
+        wall follower drives, below its ~155 deg wrap); arc length from the
+        *outer* wheel (the inner one slips on an arc):
+        ``s = outer_travel - (track/2) * |dtheta|``.
+        """
+        yaw_now = read_settled('get_yaw')
+        left_now = read_settled('get_left_wheel')
+        right_now = read_settled('get_right_wheel')
+        d_yaw = wrap_delta(self.yaw_prev, yaw_now, 12)
+        left_delta = wrap_delta(self.left_prev, left_now, 16)
+        right_delta = wrap_delta(self.right_prev, right_now, 16)
+        self.yaw_prev, self.left_prev, self.right_prev = yaw_now, left_now, right_now
+        # Map frame mirrors the gyro handedness (see update_pose).
+        heading_delta_phys = d_yaw * self.deg_per_yaw
+        dtheta_map = -heading_delta_phys
+        outer_mm = max(abs(left_delta), abs(right_delta)) * self.mm_per_wd
+        arc_len = max(
+            0.0, outer_mm - (TRACK_WIDTH_MM / 2.0) * abs(math.radians(dtheta_map))
+        )
+        previous = (self.x, self.y)
+        dx, dy, new_heading = arc_pose_delta(self.heading, dtheta_map, arc_len)
+        self.x += dx
+        self.y += dy
+        self.heading = new_heading
+        self.path.append((self.x, self.y, self.heading))
+        self.known_path.extend(
+            densify_path([previous, (self.x, self.y)], self.path_sample_mm)[1:]
+        )
+        self.quality['accepted_updates'] += 1
+        self.policy.report_progress()
+        event = {
+            'action': 'arc',
+            'requested': requested_angle_deg,
+            'raw_yaw_delta': d_yaw,
+            'heading_delta': heading_delta_phys,
+            'distance_mm': arc_len,
+            'accepted': True,
+        }
+        if arc_outcome:
+            event['arc'] = arc_outcome
+        self.events.append(event)
+        return dtheta_map
+
+    def turn_to_heading(self, target_heading, reason='align'):
+        """Turn in place to ``target_heading`` (map-frame degrees)."""
+        turn_angle = angle_delta(target_heading, self.heading)
+        if abs(turn_angle) < 1.0:
+            return
+        print(f'\n  [{reason}] turn {turn_angle:+.0f}\N{DEGREE SIGN}')
+        for step in tracked_turn_steps(turn_angle):
+            if not step:
+                continue
+            physical_step = -step
+            self.predict_dashboard_pose('turn', physical_step)
+            send_command('turn', physical_step)
+            outcome = self.update_pose('turn', physical_step)
+            self.amend_dashboard_pose()
+            if outcome is None:
+                break
+
+    def nearest_wall_segment(self):
+        """The inferred wall segment closest to the robot, or None."""
+        best, best_distance = None, float('inf')
+        for segment in self.known_wall_segments:
+            near = nearest_point_on_segment((self.x, self.y), segment)
+            distance = (near[0] - self.x) ** 2 + (near[1] - self.y) ** 2
+            if distance < best_distance:
+                best_distance, best = distance, segment
+        return best
+
+    def face_along_wall(self):
+        """Step 2: face along the nearest known wall, keeping it on the chosen
+        side. Returns False if no wall is known yet."""
+        segment = self.nearest_wall_segment()
+        if segment is None:
+            return False
+        target = wall_follow_heading((self.x, self.y), segment, WALL_FOLLOW_ON_LEFT)
+        self.turn_to_heading(target, reason='face wall')
+        return True
+
+    def arc_leg(self, radius_mm, angle_deg):
+        """Steps 3-4: arc around the wall, halting at the wall ahead, and record
+        that wall. Returns the arc outcome (with how much of the sweep ran)."""
+        # Predict the (full-sweep) end pose for the live dashboard; the measured
+        # pose amends it. dtheta_map = -command angle (the gyro frame is mirrored).
+        full_len = abs(radius_mm) * abs(math.radians(angle_deg))
+        dx, dy, end_heading = arc_pose_delta(self.heading, -angle_deg, full_len)
+        self.post_dashboard_pose(
+            (self.x + dx, self.y + dy, end_heading),
+            full_len / max(1, SENSOR_SAFE_SPEED_MMPS),
+        )
+        self._dashboard_pending = True
+        outcome = send_command('arc', radius_mm, angle_deg)['result']
+        self.update_pose_arc(angle_deg, outcome)
+        if outcome.get('halt') == 'obstacle':
+            self.mark_ahead(self.walls, self.known_walls, WALL_OFFSET_MM)
+            self.known_wall_segments[:] = inferred_wall_segments(
+                self.known_walls, max_distance=self.cell_mm
+            )
+        self.amend_dashboard_pose()
+        return outcome
+
+    def drive_forward_to_wall(self, end_time):
+        """Step 1: drive forward in legs until a wall stops one. Returns True if
+        a wall was hit, False on timeout or lost tracking."""
+        while time.time() < end_time and not self.quality['tracking_lost']:
+            remaining = end_time - time.time()
+            requested = forward_distance_for_remaining(remaining)
+            self.predict_dashboard_pose('forward', requested)
+            response = send_command(
+                'move', requested, FORWARD_SPEED_MMPS, wall_stop_sound=None
+            )
+            previous_position = (self.x, self.y)
+            known_path_len = len(self.known_path)
+            traveled = self.update_pose('forward', requested)
+            self.events[-1]['motion_outcome'] = response['result']
+            if traveled is None:
+                self.amend_dashboard_pose()
+                return False
+            left, right, tilt, reason, _sounds, back_away = self.handle_leg_end(
+                traveled,
+                requested,
+                previous_position=previous_position,
+                known_path_len=known_path_len,
+                motion_outcome=response['result'],
+            )
+            self.report_leg(max(0.0, end_time - time.time()), traveled, left, right, tilt)
+            self.amend_dashboard_pose()
+            if back_away:  # wall / obstacle / early stop
+                return True
+        return False
+
+    def follow_walls(self, end_time):
+        """Arc-based wall follower: drive to a wall, then hug it with arcs,
+        re-facing each time the arc stops on the wall ahead. When an arc runs
+        the full circle (no wall), drive forward to find the next wall."""
+        arc_angle = -WALL_FOLLOW_ARC_DEG if WALL_FOLLOW_ON_LEFT else WALL_FOLLOW_ARC_DEG
+        while time.time() < end_time and not self.quality['tracking_lost']:
+            if not self.drive_forward_to_wall(end_time):
+                break
+            while time.time() < end_time and not self.quality['tracking_lost']:
+                if not self.face_along_wall():
+                    break
+                outcome = self.arc_leg(WALL_FOLLOW_RADIUS_MM, arc_angle)
+                print(
+                    f"  [wall-follow] arc {outcome.get('completed_angle_deg')}\N{DEGREE SIGN}"
+                    f" ({outcome.get('completed_fraction', 1):.0%}), "
+                    f"halt={outcome.get('halt')}"
+                )
+                # A full circle with no obstacle means the wall fell away: go
+                # back to driving forward to find the next one.
+                if outcome.get('halt') != 'obstacle':
+                    break
+
     def result(self):
         return {
             'timestamp': datetime.now().isoformat(timespec='seconds'),
@@ -2091,12 +2319,15 @@ def explore(
     )
     run.announce()
     if not command_policy:
-        run.turn_toward_knowledge('initial strategy')
+        if exploration_policy != WALL_FOLLOWER:
+            run.turn_toward_knowledge('initial strategy')
         end_time = time.time() + duration
 
     try:
         if command_policy:
             run.drive_preset_course()
+        elif exploration_policy == WALL_FOLLOWER:
+            run.follow_walls(end_time)
         else:
             run.explore_until(end_time)
     except KeyboardInterrupt:
