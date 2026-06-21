@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 
 from apps.dashboard import server as dashboard
@@ -139,6 +141,37 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("arc", payload["frames"][1])
         self.assertNotIn("arc", payload["frames"][2])
         self.assertIn("arc", payload["frames"][3])
+
+    def test_map_app_command_runs_the_map_module_against_the_config(self):
+        cmd = dashboard.map_app_command("data/config.yaml", "start")
+        # Launches the same module a user would, so no runtime import coupling.
+        self.assertEqual(
+            cmd[1:], ["-m", "apps.map", "start", "--config", "data/config.yaml"]
+        )
+
+    def test_load_launch_config_reads_dashboard_target_and_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = os.path.join(tmp, "config.yaml")
+            with open(cfg, "w") as f:
+                f.write("dashboard:\n  host: 0.0.0.0\n  port: 8123\n"
+                        "territory_size_mm: 1500\n")
+            self.assertEqual(
+                dashboard.load_launch_config(cfg),
+                {"host": "0.0.0.0", "port": 8123, "territory_mm": 1500.0},
+            )
+
+            # No dashboard section -> dashboard defaults.
+            bare = os.path.join(tmp, "bare.yaml")
+            with open(bare, "w") as f:
+                f.write("duration_seconds: 60\n")
+            out = dashboard.load_launch_config(bare)
+            self.assertEqual(out["host"], dashboard.DEFAULT_DASHBOARD_HOST)
+            self.assertEqual(out["port"], dashboard.DEFAULT_DASHBOARD_PORT)
+
+            # Missing file -> None, so the caller can error with guidance.
+            self.assertIsNone(
+                dashboard.load_launch_config(os.path.join(tmp, "gone.yaml"))
+            )
 
     def test_amend_last_move_corrects_pose_and_adds_walls(self):
         payload = dashboard.empty_payload(territory_mm=1000)

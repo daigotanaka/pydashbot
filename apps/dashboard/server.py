@@ -12,20 +12,36 @@ opened locally or published to the web as-is.
 Dashboard mode runs an HTTP server. POST JSON moves to /move and open / in a
 browser to watch the robot pose animate live. GET /animation.html exports the
 live session as a standalone static HTML replay.
+
+By default, dashboard mode also launches the map app (as a subprocess) so a
+session needs only the robot WebSocket server and this one command. The map app
+is read from ``data/config.yaml`` in the current directory, whose ``data/``
+folder is expected to hold ``map.json`` and ``calibration.json`` as well. Pass
+``--no-map`` to serve the dashboard alone (e.g. to import and replay a saved
+map). The map app still runs standalone (``python -m apps.map start``); the two
+never import each other's runtime -- the dashboard only *spawns* it, and they
+exchange poses over HTTP.
 """
 
 import argparse
 import json
 import math
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import yaml
+
 # The dashboard depends only on the mapping library's geometry helpers; it does
 # not import the mapping application's runtime, and the mapping app does not
-# import the dashboard. The two communicate at runtime over HTTP (POST /move).
+# import the dashboard. The two communicate at runtime over HTTP (POST /move);
+# dashboard mode may also *spawn* the map app as a subprocess (see main), which
+# still keeps their runtimes separate.
 from apps.map.policies.conservative_exploration import (
     GRID_CELLS,
     TERRITORY_MM,
@@ -181,6 +197,37 @@ RUN_BOUNDARY_SECONDS = 0.5
 
 DEFAULT_DASHBOARD_HOST = '127.0.0.1'
 DEFAULT_DASHBOARD_PORT = 8000
+# The "just start the dashboard" convention: a data/ folder in the working
+# directory holding the mapping config, the map output, and the calibration.
+DEFAULT_MAP_CONFIG = Path('data') / 'config.yaml'
+
+
+def map_app_command(config_path, mode):
+    """Argv to launch the map app for ``mode`` against ``config_path``.
+
+    Runs the same module a user would (``python -m apps.map <mode> --config``),
+    so the dashboard never imports the map app's runtime -- it only spawns it.
+    """
+    return [sys.executable, '-m', 'apps.map', mode, '--config', str(config_path)]
+
+
+def load_launch_config(config_path):
+    """Read where the map app will publish poses (and the territory size) from
+    the mapping config, so the dashboard binds exactly there.
+
+    Returns ``{host, port, territory_mm}`` (filling dashboard defaults for any
+    missing keys), or ``None`` if the config file does not exist.
+    """
+    try:
+        config = yaml.safe_load(Path(config_path).read_text()) or {}
+    except OSError:
+        return None
+    dashboard = config.get('dashboard') or {}
+    return {
+        'host': dashboard.get('host', DEFAULT_DASHBOARD_HOST),
+        'port': int(dashboard.get('port', DEFAULT_DASHBOARD_PORT)),
+        'territory_mm': float(config.get('territory_size_mm', TERRITORY_MM)),
+    }
 
 
 def leg_duration(event):
@@ -887,18 +934,44 @@ def make_handler(dashboard):
     return DashboardHandler
 
 
-def serve_dashboard(host, port, title, territory_mm):
+def serve_dashboard(host, port, title, territory_mm, map_config=None,
+                    map_mode='start'):
+    """Serve the live dashboard, optionally launching the map app alongside it.
+
+    When ``map_config`` is given the dashboard binds first, then spawns the map
+    app pointed at that config, so the map app's first pose lands on a listening
+    server. The dashboard keeps serving after the mapping run ends (to inspect
+    the result) until interrupted; the map subprocess is always cleaned up.
+    """
     server, dashboard, _thread = start_dashboard_server(
-        host, port, title, territory_mm, daemon=False
+        host, port, title, territory_mm, daemon=True
     )
     print(f'Dashboard listening on http://{host}:{port}')
     print('POST moves to /move as {"pose":[x,y,heading],"duration":0.5}')
-    print('Import/export the map JSON via POST /map and GET /map.json')
+    print('Import/export the map JSON via POST /map and GET /map.json', flush=True)
+
+    map_proc = None
+    if map_config is not None:
+        cmd = map_app_command(map_config, map_mode)
+        print(f'Launching map app: {" ".join(cmd[1:])}', flush=True)
+        map_proc = subprocess.Popen(cmd)
+
     try:
-        server.serve_forever()
+        if map_proc is not None:
+            map_proc.wait()
+            print('\nMapping run finished; dashboard still serving. Ctrl-C to stop.')
+        while True:
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print('\nDashboard stopped.')
     finally:
+        if map_proc is not None and map_proc.poll() is None:
+            map_proc.terminate()
+            try:
+                map_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                map_proc.kill()
+        server.shutdown()
         server.server_close()
 
 
@@ -940,14 +1013,61 @@ def main():
         default=None,
         help='page title shown in the animation header',
     )
+    parser.add_argument(
+        '--config',
+        type=Path,
+        default=DEFAULT_MAP_CONFIG,
+        help=(
+            'mapping config used to launch the map app in dashboard mode '
+            f'(default: {DEFAULT_MAP_CONFIG})'
+        ),
+    )
+    parser.add_argument(
+        '--no-map',
+        action='store_true',
+        help='serve the dashboard only; do not launch the map app',
+    )
+    parser.add_argument(
+        '--map-mode',
+        choices=('start', 'resume', 'dock'),
+        default='start',
+        help='mode passed to the map app when launching it (default: start)',
+    )
     options = parser.parse_args()
 
-    if options.host is not None or options.port is not None or options.map_file is None:
+    # A map file given without live-serve flags renders a standalone HTML replay.
+    static_export = (
+        options.map_file is not None
+        and options.host is None
+        and options.port is None
+    )
+    if not static_export:
+        title = options.title or 'Dash Live Map Dashboard'
+        if options.no_map:
+            # Dashboard only: import/replay a map or receive poses by hand.
+            serve_dashboard(
+                options.host or DEFAULT_DASHBOARD_HOST,
+                options.port or DEFAULT_DASHBOARD_PORT,
+                title,
+                options.territory_size or TERRITORY_MM,
+            )
+            return
+        # Default: serve the dashboard and launch the map app beside it, both
+        # keyed off the same mapping config so poses land where we listen.
+        launch = load_launch_config(options.config)
+        if launch is None:
+            parser.error(
+                f'no mapping config at {options.config}; create it (with a '
+                f'data/ folder holding map.json and calibration.json) or pass '
+                f'--no-map to serve the dashboard alone'
+            )
         serve_dashboard(
-            options.host or DEFAULT_DASHBOARD_HOST,
-            options.port or DEFAULT_DASHBOARD_PORT,
-            options.title or 'Dash Live Map Dashboard',
-            options.territory_size or TERRITORY_MM,
+            options.host or launch['host'],
+            options.port or launch['port'],
+            title,
+            options.territory_size or launch['territory_mm'],
+            map_config=options.config,
+            map_mode=options.map_mode,
         )
         return
 

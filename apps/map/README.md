@@ -320,17 +320,44 @@ run and avoid go-home if this happens.
 
 The live dashboard ([`apps/dashboard`](../dashboard)) renders a map in the
 browser, live as the robot explores or replayed from a saved file. It is a
-**separate app** that runs independently of the mapper: start it first, then run
-a mapping session — the two communicate over HTTP, so the mapper never hosts the
-server in-process.
+**separate app**: the mapper never hosts the server in-process — the two
+communicate over HTTP. The dashboard can either run on its own or launch the
+mapper for you.
 
-Start the live dashboard (use a `--territory-size` matching the run's
-`territory_size_mm` so the cell grid lines up):
+### One command (dashboard launches the mapper)
+
+With only the robot WebSocket server and the dashboard running, the dashboard
+starts the mapper itself. From a directory whose `data/` folder holds the
+config, map output, and calibration:
+
+```
+data/config.yaml       # mapping config (below)
+data/map.json          # map output
+data/calibration.json  # calibration
+```
 
 ```bash
-uv run apps.dashboard --host 0.0.0.0 --port 8000 --territory-size 1000
+uv run apps.dashboard            # serves the dashboard AND launches the map app
+```
+
+It reads `data/config.yaml`, binds to that config's `dashboard.host`/`port`
+(so poses land where it listens), then spawns `apps.map start --config
+data/config.yaml` as a subprocess. The dashboard keeps serving after the run
+ends so you can inspect the result. Override the config path with `--config`,
+the launch mode with `--map-mode {start,resume,dock}`. The mapper still runs
+standalone too (`uv run apps.map start`).
+
+### Dashboard only (`--no-map`)
+
+To serve the dashboard without launching the mapper — to import/replay a saved
+map, post poses by hand, or run the mapper yourself in another terminal — use
+`--no-map` (use a `--territory-size` matching the run's `territory_size_mm` so
+the cell grid lines up):
+
+```bash
+uv run apps.dashboard --no-map --host 0.0.0.0 --port 8000 --territory-size 1000
 # or, without uv:
-python -m apps.dashboard --host 0.0.0.0 --port 8000 --territory-size 1000
+python -m apps.dashboard --no-map --host 0.0.0.0 --port 8000 --territory-size 1000
 ```
 
 Then run a mapping session with the dashboard enabled in `config.yaml`:
