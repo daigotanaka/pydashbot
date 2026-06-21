@@ -85,7 +85,7 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000) to watch the live map.
 
 For more details, read:
 - [apps/dashboard/README.md](apps/dashboard/README.md)
-- [apps/map/README.md](apps/maps/README.md)
+- [apps/map/README.md](apps/map/README.md)
 
 ## Safety
 
