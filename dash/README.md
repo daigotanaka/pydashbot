@@ -16,7 +16,7 @@ interactive Python session:
 ```python
 from dash.control.interactive import discover_and_connect_sync
 
-robot = discover_and_connect_sync()  # Discovers the default name "Doodle"
+robot = discover_and_connect_sync()  # Discovers the default name "Dash"
 if robot is None:
     raise RuntimeError("Dash was not found")
 
@@ -38,7 +38,7 @@ from dash.core.robot import discover_and_connect
 
 
 async def main():
-    robot = await discover_and_connect(name="Doodle")
+    robot = await discover_and_connect(name="MyDash")
     if robot is None:
         raise RuntimeError("Dash was not found")
     try:
@@ -53,11 +53,11 @@ async def main():
 asyncio.run(main())
 ```
 
-The default discovery name is `Doodle`. You can select another Bluetooth name
+The default discovery name is `Dash`. You can select another Bluetooth name
 or skip discovery and connect directly using a Bluetooth address:
 
 ```python
-robot = discover_and_connect_sync(name="Workshop Dash")
+robot = discover_and_connect_sync(name="MyDash")
 robot = discover_and_connect_sync(address="AA:BB:CC:DD:EE:FF")
 ```
 
@@ -271,83 +271,74 @@ packet, useful for detecting whether fresh readings have arrived. `get_robot()`
 reports the connected robot type once startup has identified the sensor
 streams.
 
-## WebSocket Server
+## Controlling Dash over WebSocket
 
-For repeated commands, the WebSocket server keeps one process connected to Dash
-and accepts commands from other terminals or computers.
+### Starting the server
 
-Start it with the default address, `127.0.0.1:8765`:
-
-```bash
-uv run dash.remote.server
-```
-
-Choose another host or port:
+Only one process can hold Dash's Bluetooth connection, so start the server first
+and leave it running; everything else talks to it over WebSocket.
 
 ```bash
-uv run dash.remote.server --host 192.168.1.10 --port 9000
+uv run dash.remote.server                          # default 127.0.0.1:8765, name "Dash"
+uv run dash.remote.server --host 0.0.0.0 --port 9000
+uv run dash.remote.server --name "Workshop Dash"   # or: --address AA:BB:CC:DD:EE:FF
+uv run dash.remote.server --silent                 # suppress all robot sounds
 ```
 
-Discover a robot with another Bluetooth name:
+`--name` and `--address` are mutually exclusive. `pydashbot-server` is an alias
+for the same server. Dash says `hi` once connected and `bye` on shutdown unless
+`--silent` is used. The server has **no authentication** — binding it to
+`0.0.0.0` or a LAN address lets any device on that network drive the robot, so
+only expose it on a trusted network.
 
-```bash
-uv run dash.remote.server --name "Workshop Dash"
-```
+### Send commands over WebSocket
 
-Connect directly without scanning:
+Any public robot method works over the WebSocket — motion, actuators, and
+sensors alike (`move`, `turn`, `arc`, `say`, `stop`, `get_prox_left`, `get_yaw`,
+…). The method name is anything documented under [Motion](#motion),
+[Actuators](#actuators), and [Sensors](#sensors). There are three ways to send
+one:
 
-```bash
-uv run dash.remote.server --address AA:BB:CC:DD:EE:FF
-```
-
-`--name` and `--address` are mutually exclusive. The default name is `Doodle`.
-
-Suppress all robot sounds for the whole session, including ones requested by
-clients and internal safety sounds:
-
-```bash
-uv run dash.remote.server --silent
-```
-
-Dash says `hi` after the server connects to it and `bye` when the server shuts
-down and disconnects, unless `--silent` is used.
-
-Use the WebSocket client:
+**1. From the shell with `pydashbot`** — a method name followed by its arguments:
 
 ```bash
 uv run pydashbot say hi
 uv run pydashbot move 200
-uv run pydashbot turn 360
+uv run pydashbot arc 120 -60
 uv run pydashbot get_prox_rear
 uv run pydashbot stop
+uv run pydashbot --host 192.168.1.10 --port 9000 move 200   # target a remote server
+uv run pydashbot move 200 --no-wall-sound                   # move only: no safety-stop sound
 ```
 
-Specify a server address:
+Each argument is parsed as JSON when possible (so `200` and `-60` become numbers
+and `true` a boolean) and otherwise kept as a string (`hi`). The result prints on
+success; an error exits non-zero.
 
-```bash
-uv run pydashbot --host 192.168.1.10 --port 9000 move 200
+**2. From Python with `send_command`** — the same client, programmatically:
+
+```python
+from dash.remote.client import send_command
+
+send_command("move", 200)                     # -> {"ok": True, "result": ...}
+send_command("arc", 120, 90, speed_mmps=100)  # kwargs are forwarded too
+print(send_command("get_yaw")["result"])
+send_command("stop", uri="ws://192.168.1.10:9000")   # non-default server
 ```
 
-Suppress the default safety-stop sound for a move:
+**3. Raw JSON** from any WebSocket client. Connect to `ws://<host>:<port>`, send
+one request, and read one reply. The request is a method name with positional
+`args` and keyword `kwargs`:
 
-```bash
-uv run pydashbot move 200 --no-wall-sound
+```json
+{"method": "move", "args": [200], "kwargs": {"speed_mmps": 150}}
 ```
 
-The server has no authentication. Binding it to `0.0.0.0` or a LAN address
-allows other devices on that network to control the robot. Only expose it on a
-trusted network.
-
-### Command protocol
-
-The WebSocket client sends a method name followed by positional arguments. The
-server returns JSON:
+The reply is `ok` with a `result`, or an error:
 
 ```json
 {"ok": true, "result": null}
 ```
-
-Errors use:
 
 ```json
 {"ok": false, "error": "error description"}
@@ -396,9 +387,6 @@ Each hardware example accepts `--name` or `--address`:
 uv run examples/simple_demo/hardware_demo.py --name "Workshop Dash"
 uv run examples/simple_demo/sensor_demo.py --address AA:BB:CC:DD:EE:FF
 ```
-
-The [room-mapping app](../apps/map/README.md) covers calibration, autonomous
-exploration, map-guided exploration, and returning to the starting pose.
 
 ## Tests
 
