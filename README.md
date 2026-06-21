@@ -70,8 +70,8 @@ and the console will display a message like:
 Connected to XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX
 ```
 
-Place Dash near a room corner with its back roughly facing one wall (20~50cm away)
-and its left side roughly facing the adjacent wall (20~50cm away):
+Place Dash near a room corner with its back roughly facing one wall (20 to 50cm away)
+and its left side roughly facing the adjacent wall (20 to 50cm away):
 
 ![Docking position](images/docking-position.jpg)
 
