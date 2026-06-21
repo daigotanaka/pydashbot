@@ -1,0 +1,22 @@
+map_file: data/map.json
+calibration: data/calibration/sample_calibration.json
+duration_seconds: 60
+territory_size_mm: 1000
+
+# Policies selected by name.
+policies:
+  # Exploration (which way to drive while mapping): conservative | coverage |
+  # novelty | wall-follower.
+  exploration: coverage 
+  # Navigation (route planning between points; go-home is its caller):
+  # d-star-lite | hard-blocked-edge.
+  navigation: hard-blocked-edge
+  # For a fixed course, use a mapping: {name: preset, input_file: ...}.
+
+docking:
+  init: true
+
+dashboard:
+  active: true
+  host: 127.0.0.1
+  port: 8000

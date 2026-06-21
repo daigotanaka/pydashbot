@@ -67,7 +67,8 @@ map was saved, or when you have deliberately placed it at that saved pose.
 
 `dock` requires an existing `map_file` and returns home from the final saved
 pose. It plans over previously traversed path segments and does not invent
-shortcuts through unknown space.
+shortcuts through unknown space. `dock` is experimental feature, and it might
+not work at all.
 
 ## Configuration
 

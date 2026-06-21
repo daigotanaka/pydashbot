@@ -54,66 +54,38 @@ uv sync
 ```
 
 Turn on Dash before connecting. Only one process can maintain the Bluetooth
-connection at a time.
+connection at a time. Make sure Dash is within Bluetooth range of your computer.
 
 Start the WebSocket server in one terminal:
 
 ```bash
-uv run dash.remote.server
+uv run dash.remote.server --name <your Dash robot's name>
 ```
 
-Place Dash in open space, then calibrate it from a second terminal:
+If your dash name has not changed from default names (Dash, Dashet), you can
+ommit `--name` argument. When connected, Dash will stop spontaneous movements,
+and the console will display a message like:
 
-```bash
-mkdir -p data/calibration
-uv run apps/map/calibrate.py --output data/calibration/calibration.json
+```
+Connected to XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX
 ```
 
-Create `data/config.yaml`:
-
-```yaml
-map_file: data/room_map.json
-calibration: data/calibration/calibration.json
-duration_seconds: 60
-territory_size_mm: 1000
-
-policies:
-  exploration: conservative
-  navigation: d-star-lite
-
-docking:
-  init: true
-
-dashboard:
-  active: true
-  host: 127.0.0.1
-  port: 8000
-```
-
-Place Dash near a room corner with its back roughly facing one wall and its
-left side roughly facing the adjacent wall:
+Place Dash near a room corner with its back roughly facing one wall (20~50cm away)
+and its left side roughly facing the adjacent wall (20~50cm away):
 
 ![Docking position](images/docking-position.jpg)
 
 Start the dashboard and map app:
 
 ```bash
-uv run apps.dashboard --config data/config.yaml
+uv run apps.dashboard --config data/sample_config.yaml
 ```
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000) to watch the live map.
 
-To resume an existing map instead of starting from the dock pose:
-
-```bash
-uv run apps.dashboard --config data/config.yaml --map-mode resume
-```
-
-To send Dash home using the saved map, run the map app directly:
-
-```bash
-uv run apps.map dock --config data/config.yaml
-```
+For more details, read:
+- [apps/dashboard/README.md](apps/dashboard/README.md)
+- [apps/map/README.md](apps/maps/README.md)
 
 ## Safety
 
