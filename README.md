@@ -91,7 +91,11 @@ dashboard:
 ```
 
 Place Dash near a room corner with its back roughly facing one wall and its
-left side roughly facing the adjacent wall. Start the dashboard and map app:
+left side roughly facing the adjacent wall:
+
+![Docking position](images/docking-position.jpg)
+
+Start the dashboard and map app:
 
 ```bash
 uv run apps.dashboard --config data/config.yaml
