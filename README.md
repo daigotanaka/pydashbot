@@ -36,7 +36,7 @@ At a high level:
 - Python 3.11
 - uv ([How to install uv](https://docs.astral.sh/uv/getting-started/installation/))
 - A Bluetooth Low Energy adapter (Any modern laptop should have it already)
-- A Wonder Workshop Dash robot
+- A [Wonder Workshop Dash robot](https://www.makewonder.com/dash/)
 
 `pydashbot` is tested on macOS and Ubuntu.
 
