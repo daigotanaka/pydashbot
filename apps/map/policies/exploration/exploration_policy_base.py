@@ -36,6 +36,8 @@ class PolicyContext:
     known_wall_segments: list = field(default_factory=list)
     territory_mm: float = 0.0
     sample_distances: tuple = ()
+    #: extra params for the selected exploration policy (e.g. preset input_file).
+    exploration_options: dict = field(default_factory=dict)
 
 
 class ExplorationPolicy(ABC):
@@ -122,28 +124,3 @@ class ExplorationPolicy(ABC):
     def metadata(self):
         """Per-run metadata recorded in the map JSON."""
         return {}
-
-
-# Command policies emit an explicit move/turn course (see preset_exploration);
-# they are a separate family from the heading policies above, registered here so
-# load_exploration_policy can resolve a config by name.
-try:
-    from apps.map.policies.exploration.preset_exploration import PresetExplorationPolicy
-except ModuleNotFoundError:
-    from policies.exploration.preset_exploration import PresetExplorationPolicy
-
-
-COMMAND_POLICIES = {
-    PresetExplorationPolicy.name: PresetExplorationPolicy,
-}
-
-
-def load_exploration_policy(configs):
-    """Load the first configured command policy, which has command priority."""
-    if not configs:
-        return None
-    config = configs[0]
-    policy_type = COMMAND_POLICIES.get(config['name'])
-    if policy_type is None:
-        raise ValueError(f"unknown exploration policy: {config['name']}")
-    return policy_type.from_config(config)

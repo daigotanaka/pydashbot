@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from apps.map import calibrate
 from apps.map.policies.exploration import conservative_exploration as conservative
-from apps.map.policies.exploration import exploration_policy_base
 from apps.map import main as map_room
 from apps.map.policies.exploration.novelty_exploration import NoveltyExplorationPolicy
 
@@ -192,25 +191,24 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(options.mode, "start")
         self.assertEqual(options.map_file, "data/room_map.json")
 
-    def test_mapping_config_preserves_policy_priority_order(self):
+    def test_mapping_config_selects_preset_with_options(self):
+        # The preset policy is selected like any exploration policy; its
+        # input_file rides along as a `{name, ...options}` mapping.
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.yaml"
             config.write_text(
                 "map_file: data/room_map.json\n"
-                "policy:\n"
-                "  - name: preset\n"
+                "policies:\n"
+                "  exploration:\n"
+                "    name: preset\n"
                 "    input_file: data/course.json\n"
-                "  - name: later-policy\n"
             )
 
             options = map_room.parse_args(["start", "--config", str(config)])
 
+        self.assertEqual(options.exploration_policy, "preset")
         self.assertEqual(
-            options.policy,
-            [
-                {"name": "preset", "input_file": "data/course.json"},
-                {"name": "later-policy"},
-            ],
+            options.exploration_options, {"input_file": "data/course.json"}
         )
 
     def test_custom_config_file_is_selected_from_cli(self):
@@ -412,12 +410,6 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertNotIn((500.0, 0.0), path)
 
     def test_preset_course_visits_expected_cells_and_ends_in_cell_zero_two(self):
-        policy = exploration_policy_base.load_exploration_policy(
-            [
-                {"name": "preset", "input_file": str(FIXTURES / "course.json")},
-                {"name": "lower-priority-policy"},
-            ]
-        )
         readings = {
             "get_yaw": iter([0]),
             "get_left_wheel": iter([0]),
@@ -465,7 +457,8 @@ class MappingStrategyTests(unittest.TestCase):
                 80.0,
                 -80.0,
                 duration=60,
-                command_policy=policy,
+                exploration_policy="preset",
+                exploration_options={"input_file": str(FIXTURES / "course.json")},
             )
 
         cells = [
@@ -487,9 +480,9 @@ class MappingStrategyTests(unittest.TestCase):
             resolution["visited"],
             {(0, 2), (0, 3), (1, 2), (1, 3)},
         )
-        self.assertEqual(run["exploration_policy"]["name"], "preset")
-        self.assertTrue(run["exploration_policy"]["completed"])
-        self.assertEqual(run["exploration_policy"]["commands_completed"], 5)
+        self.assertEqual(run["preset_exploration"]["name"], "preset")
+        self.assertTrue(run["preset_exploration"]["completed"])
+        self.assertEqual(run["preset_exploration"]["commands_completed"], 5)
         moves = [call for call in calls if call[0] == "move"]
         self.assertEqual([move[1][0] for move in moves], [250, 250, 250])
         self.assertEqual([move[1][1] for move in moves], [200, 200, 200])

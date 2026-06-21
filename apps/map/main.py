@@ -32,16 +32,14 @@ try:
     )
     from apps.map.policies.exploration.coverage_exploration import CoverageExploration
     from apps.map.policies.exploration.novelty_exploration import NoveltyExplorationPolicy
+    from apps.map.policies.exploration.preset_exploration import PresetExplorationPolicy
     from apps.map.policies.exploration.wall_follower import WallFollower, arc_pose_delta
     from apps.map.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
     )
-    from apps.map.policies.exploration.exploration_policy_base import (
-        PolicyContext,
-        load_exploration_policy,
-    )
+    from apps.map.policies.exploration.exploration_policy_base import PolicyContext
     from apps.map.policies.navigation.d_star_lite import DStarLitePolicy
     from apps.map.policies.navigation.hard_blocked_edge import HardBlockedEdgePolicy
     from apps.map.policies.navigation.navigation_policy_base import edge_is_blocked
@@ -54,16 +52,14 @@ except ModuleNotFoundError:
     )
     from policies.exploration.coverage_exploration import CoverageExploration
     from policies.exploration.novelty_exploration import NoveltyExplorationPolicy
+    from policies.exploration.preset_exploration import PresetExplorationPolicy
     from policies.exploration.wall_follower import WallFollower, arc_pose_delta
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
     )
-    from policies.exploration.exploration_policy_base import (
-        PolicyContext,
-        load_exploration_policy,
-    )
+    from policies.exploration.exploration_policy_base import PolicyContext
     from policies.navigation.d_star_lite import DStarLitePolicy
     from policies.navigation.hard_blocked_edge import HardBlockedEdgePolicy
     from policies.navigation.navigation_policy_base import edge_is_blocked
@@ -181,6 +177,7 @@ EXPLORATION_POLICIES = {
     'conservative': ConservativeExploration,
     'coverage': CoverageExploration,
     WallFollower.name: WallFollower,
+    PresetExplorationPolicy.name: PresetExplorationPolicy,
 }
 DEFAULT_EXPLORATION_POLICY = 'conservative'
 MAPPING_CONFIG_KEYS = {
@@ -190,7 +187,6 @@ MAPPING_CONFIG_KEYS = {
     'policies',
     'territory_size_mm',
     'docking',
-    'policy',
     'dashboard',
 }
 # Policies selected by name: the exploration policy drives mapping; the
@@ -265,8 +261,8 @@ def apply_mapping_config(options, config, parser):
     options.docking = validate_docking_config(config.get('docking', {}), parser)
     policies = validate_policies_config(config.get('policies', {}), parser)
     options.exploration_policy = policies['exploration']
+    options.exploration_options = policies['exploration_options']
     options.go_home_strategy = policies['navigation']
-    options.policy = validate_policy_config(config.get('policy', []), parser)
     options.dashboard = validate_dashboard_config(
         config.get('dashboard', {}), parser
     )
@@ -279,7 +275,12 @@ def apply_mapping_config(options, config, parser):
 
 
 def validate_policies_config(policies, parser):
-    """Validate the exploration and navigation policy selections."""
+    """Validate the exploration and navigation policy selections.
+
+    ``policies.exploration`` is either a policy name or a ``{name, ...options}``
+    mapping (the options carry policy-specific params, e.g. the preset policy's
+    ``input_file``). ``policies.navigation`` is a plain policy name.
+    """
     if policies is None:
         policies = {}
     if not isinstance(policies, dict):
@@ -287,18 +288,35 @@ def validate_policies_config(policies, parser):
     unknown = sorted(set(policies) - set(DEFAULT_POLICIES_CONFIG))
     if unknown:
         parser.error(f"unknown policies setting(s): {', '.join(unknown)}")
-    merged = {**DEFAULT_POLICIES_CONFIG, **policies}
-    if merged['exploration'] not in EXPLORATION_POLICIES:
+
+    exploration = policies.get('exploration', DEFAULT_POLICIES_CONFIG['exploration'])
+    if isinstance(exploration, str):
+        name, exploration_options = exploration, {}
+    elif isinstance(exploration, dict) and isinstance(exploration.get('name'), str):
+        name = exploration['name']
+        exploration_options = {k: v for k, v in exploration.items() if k != 'name'}
+    else:
+        parser.error(
+            "config policies.exploration must be a policy name or a mapping "
+            "with a string name"
+        )
+    if name not in EXPLORATION_POLICIES:
         parser.error(
             "config policies.exploration must be one of: "
             f"{', '.join(EXPLORATION_POLICIES)}"
         )
-    if merged['navigation'] not in GO_HOME_STRATEGIES:
+
+    navigation = policies.get('navigation', DEFAULT_POLICIES_CONFIG['navigation'])
+    if navigation not in GO_HOME_STRATEGIES:
         parser.error(
             "config policies.navigation must be one of: "
             f"{', '.join(GO_HOME_STRATEGIES)}"
         )
-    return merged
+    return {
+        'exploration': name,
+        'exploration_options': exploration_options,
+        'navigation': navigation,
+    }
 
 
 def validate_docking_config(docking, parser):
@@ -380,21 +398,6 @@ class DashboardPublisher:
     def upload_map(self, data):
         """Push the authoritative map JSON so the dashboard can export it."""
         self._request('POST', '/map', data)
-
-
-def validate_policy_config(policy, parser):
-    """Validate ordered command-policy configuration."""
-    if policy is None:
-        return []
-    if not isinstance(policy, list):
-        parser.error("config policy must be a list")
-    for index, item in enumerate(policy):
-        if not isinstance(item, dict):
-            parser.error(f"config policy item {index + 1} must be a mapping")
-        name = item.get('name')
-        if not isinstance(name, str) or not name.strip():
-            parser.error(f"config policy item {index + 1} requires a non-empty name")
-    return policy
 
 
 def positive_seconds(value):
@@ -1357,14 +1360,13 @@ class _ExplorationRun:
         strategy_map=None,
         duration=DURATION,
         territory_mm=TERRITORY_MM,
-        command_policy=None,
         exploration_policy=DEFAULT_EXPLORATION_POLICY,
+        exploration_options=None,
         dashboard=None,
     ):
         self.deg_per_yaw = deg_per_yaw
         self.mm_per_wd = mm_per_wd
         self.duration = duration
-        self.command_policy = command_policy
         self.dashboard = dashboard
         self._dashboard_warned = False
         # How many of self.walls / self.obstacles have been sent to the live
@@ -1395,7 +1397,6 @@ class _ExplorationRun:
             'tracking_lost': False,
             'issues': [],
         }
-        self.policy_commands_completed = 0
         self.cell_mm = territory_mm / GRID_CELLS
         self.path_sample_mm = self.cell_mm / 2
         self.known_path, self.known_blockers = map_knowledge(
@@ -1449,6 +1450,7 @@ class _ExplorationRun:
             known_wall_segments=self.known_wall_segments,
             territory_mm=territory_mm,
             sample_distances=STRATEGY_SAMPLE_DISTANCES,
+            exploration_options=exploration_options or {},
         ))
         # Prime the dashboard with prior-run coverage and blockers (resume
         # only) before the live frames start, so already-mapped visited /
@@ -1911,32 +1913,21 @@ class _ExplorationRun:
 
     # -- run phases --------------------------------------------------------
     def announce(self):
-        if self.command_policy:
-            print(f"\n=== Exploring preset course ===")
-        else:
-            print(f"\n=== Exploring for {self.duration:g}s ===")
-            print(
-                f"  Repeatedly trying {FORWARD_DISTANCE_MM}mm forward legs; "
-                "walls and tilt stop each leg early."
-            )
+        print(f"\n=== Exploring for {self.duration:g}s ===")
         print(self.policy.describe())
         send_command('say', 'hi')
         send_command('neck_color', '#00ff00')
         self.policy.report_progress()
-        if self.command_policy:
-            print(
-                f"  Command policy: {self.command_policy.name} "
-                f"({len(self.command_policy.commands)} commands)"
-            )
 
-    def drive_preset_course(self):
-        command_policy = self.command_policy
-        for index, command in enumerate(command_policy.commands, start=1):
+    def drive_preset_course(self, commands):
+        """Replay an explicit move/turn course. Returns how many commands ran."""
+        commands_completed = 0
+        for index, command in enumerate(commands, start=1):
             if self.quality['tracking_lost']:
                 break
             name, value = command['command'], command['value']
             print(
-                f"\n  [preset {index}/{len(command_policy.commands)}] "
+                f"\n  [preset {index}/{len(commands)}] "
                 f"{name} {value:g}"
             )
             if name == 'turn':
@@ -1952,7 +1943,7 @@ class _ExplorationRun:
                         break
                 if self.quality['tracking_lost']:
                     break
-                self.policy_commands_completed = index
+                commands_completed = index
                 continue
             self.predict_dashboard_pose('forward', value)
             response = send_command(
@@ -1998,9 +1989,10 @@ class _ExplorationRun:
             if back_away:
                 print(f"\n  [preset halted] {reason}")
                 break
-            self.policy_commands_completed = index
-        if self.policy_commands_completed == len(command_policy.commands):
+            commands_completed = index
+        if commands_completed == len(commands):
             print("\n  [preset complete] final action finished")
+        return commands_completed
 
     def explore_until(self, end_time):
         while time.time() < end_time and not self.quality['tracking_lost']:
@@ -2195,23 +2187,7 @@ class _ExplorationRun:
             'path': self.path,
             'walls': self.walls,
             'obstacles': self.obstacles,
-            **(
-                {self.policy.metadata_key: self.policy.metadata()}
-            ),
-            **(
-                {
-                    'exploration_policy': {
-                        **self.command_policy.metadata(),
-                        'commands_completed': self.policy_commands_completed,
-                        'completed': (
-                            self.policy_commands_completed
-                            == len(self.command_policy.commands)
-                        ),
-                    }
-                }
-                if self.command_policy
-                else {}
-            ),
+            self.policy.metadata_key: self.policy.metadata(),
             'events': self.events,
         }
 
@@ -2225,14 +2201,15 @@ def explore(
     strategy_map=None,
     duration=DURATION,
     territory_mm=TERRITORY_MM,
-    command_policy=None,
     exploration_policy=DEFAULT_EXPLORATION_POLICY,
+    exploration_options=None,
     dashboard=None,
 ):
     """Drive one exploration run and return its recorded map contribution.
 
-    High-level flow: set up the run, announce it, then either replay a preset
-    course or explore on a time budget, and always stop the robot safely.
+    High-level flow: set up the run, announce it, let the selected policy drive
+    (a time-budgeted heading search, a wall-follow loop, or a preset course),
+    and always stop the robot safely.
     """
     run = _ExplorationRun(
         deg_per_yaw,
@@ -2243,16 +2220,13 @@ def explore(
         strategy_map,
         duration,
         territory_mm,
-        command_policy,
         exploration_policy,
+        exploration_options,
         dashboard,
     )
     run.announce()
     try:
-        if command_policy:
-            run.drive_preset_course()
-        else:
-            run.policy.drive(run, duration)
+        run.policy.drive(run, duration)
     except KeyboardInterrupt:
         print('\nInterrupted.')
     finally:
@@ -2332,11 +2306,6 @@ def main(args=None):
     map_file = Path(options.map_file)
     if options.mode in {'resume', 'dock'} and not map_file.exists():
         raise ValueError(f"{options.mode} requires existing map file {map_file}")
-    command_policy = (
-        load_exploration_policy(options.policy)
-        if options.mode != 'dock'
-        else None
-    )
 
     send_command('stop')
     time.sleep(1.0)
@@ -2419,8 +2388,8 @@ def main(args=None):
                 strategy_map,
                 duration=options.duration,
                 territory_mm=options.territory_size,
-                command_policy=command_policy,
                 exploration_policy=options.exploration_policy,
+                exploration_options=options.exploration_options,
                 dashboard=live_dashboard,
             )
         ]

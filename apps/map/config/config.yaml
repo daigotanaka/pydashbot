@@ -10,16 +10,16 @@ policies:
   # - coverage      : bounded territories, maximize newly-visited cells per leg
   # - novelty       : no territory limit, head toward unexplored space
   # - wall-follower : arc-based; drive to a wall, then hug it with arcs
+  # - preset        : replay a fixed move/turn course (give it an input_file,
+  #                   as a mapping instead of a bare name):
+  #     exploration:
+  #       name: preset
+  #       input_file: data/preset_courses/course.json
   exploration: coverage
   # Navigation (route planning between points; go-home is its caller):
   # - d-star-lite       : replan with soft costs around failed approaches
   # - hard-blocked-edge : permanently exclude every corridor marked blocked
   navigation: hard-blocked-edge
-
-# Command (preset course) policy; overrides exploration while it runs.
-# policy:
-#   - name: preset
-#     input_file: data/preset_courses/course.json
 
 docking:
   # false to skip the initial dock positioning sequence

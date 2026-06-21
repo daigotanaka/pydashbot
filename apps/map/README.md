@@ -38,29 +38,32 @@ territory_size_mm: 1000
 policies:
   exploration: conservative
   navigation: d-star-lite
-policy:
-  - name: preset
-    input_file: data/course.json
 docking:
   init: true
 ```
 
-`policies.exploration` selects the heading policy by name: `conservative`
+`policies.exploration` selects the exploration policy by name: `conservative`
 (bounded territories, frontier-alignment objective; the default), `coverage`
 (bounded territories, maximize newly-visited cells per leg — see
 [The coverage objective](#step-5-done-the-coverage-objective--coverageexploration)),
-`novelty` (no territory limit, head toward unexplored space), or `wall-follower`.
-`policies.navigation` selects the route planner used to travel between points
-over the proven graph — `d-star-lite` (default) or `hard-blocked-edge`; today
-go-home is its only caller. The separate `policy:` list below is the *command*
-(preset course) policy and overrides heading selection while it runs.
+`novelty` (no territory limit, head toward unexplored space), `wall-follower`,
+or `preset` (replay a fixed move/turn course). `policies.navigation` selects the
+route planner used to travel between points over the proven graph —
+`d-star-lite` (default) or `hard-blocked-edge`; today go-home is its only caller.
 
-Exploration policies are ordered by priority. When `policy` is present, the
-first policy drives the robot. The `preset` policy reads a JSON command course
-and executes it through the normal mapping odometry and safety checks. Preset
-exploration finishes immediately after its final action; `duration_seconds`
-does not keep it running. Remove `policy` to use the normal map-guided
-exploration strategy.
+A policy that needs parameters is given as a `{name, ...options}` mapping
+instead of a bare name. The `preset` policy takes an `input_file`:
+
+```yaml
+policies:
+  exploration:
+    name: preset
+    input_file: data/course.json
+```
+
+The `preset` policy reads a JSON command course and executes it through the
+normal mapping odometry and safety checks. It finishes immediately after its
+final action; `duration_seconds` does not keep it running.
 
 A preset course like this one runs a cell-conversion check from the dock pose
 (currently `(310,310)`):

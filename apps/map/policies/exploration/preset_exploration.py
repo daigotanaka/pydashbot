@@ -1,25 +1,36 @@
-"""Preset command policy: replay a fixed move/turn course from JSON.
+"""Preset exploration policy: replay a fixed move/turn course from JSON.
 
-Unlike the heading policies (ExplorationPolicy subclasses), a command policy
-emits an explicit sequence of move/turn commands the run drives verbatim.
+Unlike the heading policies, which score candidate headings, the preset policy
+emits an explicit sequence of move/turn commands the run drives verbatim -- so
+like the wall follower it overrides ``drive`` instead of ``heading_preference``.
 """
 
 import json
 from pathlib import Path
 
+try:
+    from apps.map.policies.exploration.exploration_policy_base import ExplorationPolicy
+except ModuleNotFoundError:
+    from policies.exploration.exploration_policy_base import ExplorationPolicy
 
-class PresetExplorationPolicy:
+
+class PresetExplorationPolicy(ExplorationPolicy):
     """Replay a fixed sequence of move and turn commands from JSON."""
 
     name = 'preset'
+    metadata_key = 'preset_exploration'
 
     def __init__(self, commands, input_file):
         self.commands = commands
         self.input_file = str(input_file)
+        self.commands_completed = 0
 
     @classmethod
-    def from_config(cls, config):
-        input_file = config.get('input_file')
+    def from_context(cls, context):
+        return cls.from_input_file(context.exploration_options.get('input_file'))
+
+    @classmethod
+    def from_input_file(cls, input_file):
         if not isinstance(input_file, str) or not input_file.strip():
             raise ValueError("preset policy requires a non-empty input_file")
         path = Path(input_file)
@@ -41,11 +52,23 @@ class PresetExplorationPolicy:
             )
         return cls([validate_preset_command(command) for command in commands], path)
 
+    def heading_preference(self, x, y, heading):
+        return 0.0  # the course is explicit; no heading scoring is used
+
+    def describe(self):
+        return f"  Preset course: {len(self.commands)} fixed move/turn command(s)."
+
+    def drive(self, run, duration):
+        """Replay the course (ignoring the time budget) and record how far it got."""
+        self.commands_completed = run.drive_preset_course(self.commands)
+
     def metadata(self):
         return {
             'name': self.name,
             'input_file': self.input_file,
             'commands': self.commands,
+            'commands_completed': self.commands_completed,
+            'completed': self.commands_completed == len(self.commands),
         }
 
 
