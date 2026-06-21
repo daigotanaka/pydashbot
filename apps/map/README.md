@@ -123,6 +123,100 @@ Preset course files contain either a command list or an object with a
 - `d-star-lite`: replans with soft costs around failed approaches.
 - `hard-blocked-edge`: excludes blocked corridors more aggressively.
 
+## Custom Policies
+
+Exploration and navigation policies are ordinary Python classes selected by
+name from the YAML config. Add a new policy when you want to experiment with
+the robot's decision making without changing the CLI, map format, calibration,
+or persistence code.
+
+Custom exploration policies live in `apps/map/policies/exploration/`. Subclass
+`ExplorationPolicy` from `exploration_policy_base.py`, give the class a stable
+`metadata_key`, and implement `heading_preference(x, y, heading)`. The mapper
+scores candidate headings by combining that positive preference with its shared
+physical safety penalties. Use `from_context(cls, context)` when the policy
+needs live path points, blockers, wall segments, territory size, or
+policy-specific YAML options.
+
+```python
+from apps.map.policies.exploration.exploration_policy_base import ExplorationPolicy
+
+
+class MyExplorationPolicy(ExplorationPolicy):
+    metadata_key = "my_exploration"
+
+    @classmethod
+    def from_context(cls, context):
+        return cls(context.known_path, context.exploration_options)
+
+    def __init__(self, known_path, options):
+        self.known_path = known_path
+        self.weight = float(options.get("weight", 1.0))
+
+    def heading_preference(self, x, y, heading):
+        return self.weight
+```
+
+Bounded or self-driving exploration policies can also override hooks such as
+`allows_point`, `forward_distance`, `unlock_if_complete`, `is_complete`, and
+`drive`. See `conservative_exploration.py`, `coverage_exploration.py`, and
+`wall_follower.py` for examples of those stronger control surfaces.
+
+Register the exploration policy in `EXPLORATION_POLICIES` in `apps/map/main.py`
+and select it from config:
+
+```python
+EXPLORATION_POLICIES = {
+    "my-policy": MyExplorationPolicy,
+    ...
+}
+```
+
+```yaml
+policies:
+  exploration:
+    name: my-policy
+    weight: 2.0
+```
+
+Custom navigation policies live in `apps/map/policies/navigation/`. Subclass
+`NavigationPolicy` from `navigation_policy_base.py`, set a unique `name`, and
+implement `plan_route(data, accepted_runs, run_pose_trustworthy,
+target_xy=None)`. Return a list of `(x, y)` route points over proven map paths,
+or raise `ValueError` when no safe route exists. The helpers in
+`navigation_policy_base.py` build and simplify the proven path graph used by
+the bundled planners.
+
+```python
+from apps.map.policies.navigation.navigation_policy_base import NavigationPolicy
+
+
+class MyNavigationPolicy(NavigationPolicy):
+    name = "my-navigation"
+
+    def plan_route(self, data, accepted_runs, run_pose_trustworthy, target_xy=None):
+        raise ValueError("no route found")
+```
+
+Register an instance in `GO_HOME_STRATEGIES` in `apps/map/main.py` and select
+it from config:
+
+```python
+GO_HOME_STRATEGIES = {
+    "my-navigation": MyNavigationPolicy(),
+    ...
+}
+```
+
+```yaml
+policies:
+  navigation: my-navigation
+```
+
+Add focused tests next to the existing policy tests before running the robot.
+`tests/test_coverage_exploration.py`, `tests/test_wall_follower.py`, and
+`tests/test_navigation.py` are good templates.
+
 `docking.init` controls whether `start` runs the physical docking sequence. Keep
 it `true` for ordinary fresh runs. Set it to `false` only when you have manually
 placed Dash at the established start pose.
