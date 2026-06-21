@@ -150,11 +150,16 @@ Preset course files contain either a command list or an object with a
 
 ### Navigation Policies
 
-Navigation policies decide how `dock` plans a route from the latest saved pose
-back to the start. They plan over proven path segments from accepted map runs
-instead of inventing shortcuts through unknown space.
+Navigation policies decide what Dash should do with map knowledge that already
+exists. Where exploration policies create new map information, navigation
+policies use known paths, blockers, walls, pose trust, and prior failures to
+choose actions toward a goal.
 
-`policies.navigation` selects the route planner used by `dock`:
+The current navigation policies are route planners used by `dock`: they plan
+from the latest saved pose back to the start over proven path segments from
+accepted map runs, instead of inventing shortcuts through unknown space.
+
+`policies.navigation` selects the active navigation strategy:
 
 - `d-star-lite`: replans with soft costs around failed approaches.
 - `hard-blocked-edge`: excludes blocked corridors more aggressively.
