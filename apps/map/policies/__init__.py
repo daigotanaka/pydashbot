@@ -1,2 +1,1 @@
-"""Exploration policies for the map app."""
-
+"""Pluggable policies for the map app: exploration and navigation."""

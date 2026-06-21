@@ -42,7 +42,7 @@ import yaml
 # import the dashboard. The two communicate at runtime over HTTP (POST /move);
 # dashboard mode may also *spawn* the map app as a subprocess (see main), which
 # still keeps their runtimes separate.
-from apps.map.policies.conservative_exploration import (
+from apps.map.policies.exploration.conservative_exploration import (
     GRID_CELLS,
     TERRITORY_MM,
     densify_path,

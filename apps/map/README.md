@@ -445,8 +445,9 @@ comparison. It can remove a different, already-driven parallel corridor and
 produce a false "no unblocked route home." The default D* Lite strategy fixes
 this by applying localized directional costs instead of hard exclusions.
 
-Relevant code: `HardBlockedEdgeStrategy` and `DStarLiteStrategy` in
-`apps/map/strategies/go_home_strategies.py`.
+Relevant code: `HardBlockedEdgePolicy` (`apps/map/policies/navigation/hard_blocked_edge.py`)
+and `DStarLitePolicy` (`apps/map/policies/navigation/d_star_lite.py`), both
+subclasses of `NavigationPolicy` (`apps/map/policies/navigation/navigation_policy_base.py`).
 
 ## Conservative Exploration
 
@@ -512,7 +513,7 @@ progress persists across `start` runs, and expansion favors nearby
 uncharted territory so the explored region grows compactly.
 
 This feature is experimental and isolated in
-`apps/map/policies/conservative_exploration.py`. Set
+`apps/map/policies/exploration/conservative_exploration.py`. Set
 `exploration_policy: novelty` to disable it.
 
 The core explorer interacts with the policy only through optional hooks for
@@ -661,8 +662,8 @@ corridor, so Dash re-discovers the route to a distant focus territory leg by
 leg, the same way it explores unknown space, even though the map already
 records exactly how it got there the first time.
 
-This is a different mechanism from go-home's `DStarLiteStrategy`
-(`apps/map/strategies/go_home_strategies.py`), which builds a graph from path
+This is a different mechanism from go-home`s `DStarLitePolicy`
+(`apps/map/policies/navigation/d_star_lite.py`), which builds a graph from path
 segments already driven, links nearby/collinear segments, and plans a route
 through that graph — explicitly preferring known-clear corridors and
 replanning around recorded blockages. Go-home has this; frontier-seeking
@@ -689,7 +690,7 @@ router:
 This is flagged as two pieces of work, not one:
 
 1. **Refactoring.** The route-planning strategy (`GoHomeStrategy` /
-   `DStarLiteStrategy` / `HardBlockedEdgeStrategy`) is currently parameterized
+   `DStarLitePolicy` / `HardBlockedEdgePolicy`) is currently parameterized
    around "drive home" specifics (start pose, `accepted_runs`,
    `run_pose_trustworthy`). Generalizing it means separating "build a corridor
    graph from the map" from "plan a route between two arbitrary points on that
@@ -705,8 +706,8 @@ This is flagged as two pieces of work, not one:
    through unknown space, abort on rejected odometry, etc.) carry over to a
    goal that is not "home" — needs design before implementation.
 
-Relevant code: `DStarLiteStrategy`, `HardBlockedEdgeStrategy`, `plan_route` in
-`apps/map/strategies/go_home_strategies.py`; `go_home`, `go_home_with_retries` in
+Relevant code: `DStarLitePolicy`, `HardBlockedEdgePolicy`, `plan_route` under
+`apps/map/policies/navigation/`; `go_home`, `go_home_with_retries` in
 `apps/map/main.py`; `CoverageExploration.heading_preference`,
 `_aim_toward_expansion`, `_select_territory_expansion` in
 `apps/map/policies/coverage_exploration.py`.
@@ -790,7 +791,7 @@ wall.
    while keeping the retry count bounded.
 
 Relevant code: `go_home_with_retries`, `go_home`, `plan_home_route`,
-`DStarLiteStrategy`, and the final-approach helpers (`crawl_home`,
+`DStarLitePolicy`, and the final-approach helpers (`crawl_home`,
 `rear_reference`).
 
 ### Detecting Wheel Slip
@@ -892,7 +893,7 @@ rectangle (`MIN_CORRIDOR_OPENING_MM` wide, leg-length long) and checking for
 intersection, rather than measuring undirected point-to-segment distance.
 
 Relevant code: `territory_resolution` and `MIN_CORRIDOR_OPENING_MM` /
-`CORRIDOR_HALF_CLEARANCE_MM` in `apps/map/policies/conservative_exploration.py`;
+`CORRIDOR_HALF_CLEARANCE_MM` in `apps/map/policies/exploration/conservative_exploration.py`;
 `segment_crosses_wall` in `apps/map/exploration_walls.py`; regression
 tests in `tests/test_conservative_exploration.py`.
 

@@ -1,6 +1,6 @@
 import unittest
 
-from apps.map.policies import conservative_exploration as conservative
+from apps.map.policies.exploration import conservative_exploration as conservative
 from apps.map import exploration_walls
 from apps.map import main as map_room
 

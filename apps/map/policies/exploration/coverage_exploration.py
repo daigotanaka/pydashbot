@@ -25,7 +25,7 @@ expansion) and changes two things:
 import math
 
 try:
-    from apps.map.policies.conservative_exploration import (
+    from apps.map.policies.exploration.conservative_exploration import (
         ConservativeExploration,
         FRONTIER_HEADING_WEIGHT,
         MIN_USEFUL_FORWARD_MM,
@@ -47,7 +47,7 @@ try:
         point_segment_distance,
     )
 except ModuleNotFoundError:
-    from policies.conservative_exploration import (
+    from policies.exploration.conservative_exploration import (
         ConservativeExploration,
         FRONTIER_HEADING_WEIGHT,
         MIN_USEFUL_FORWARD_MM,

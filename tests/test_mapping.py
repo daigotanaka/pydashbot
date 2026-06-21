@@ -6,10 +6,10 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from apps.map import calibrate
-from apps.map.policies import conservative_exploration as conservative
-from apps.map.policies import exploration_policy_base
+from apps.map.policies.exploration import conservative_exploration as conservative
+from apps.map.policies.exploration import exploration_policy_base
 from apps.map import main as map_room
-from apps.map.policies.novelty_exploration import NoveltyExplorationPolicy
+from apps.map.policies.exploration.novelty_exploration import NoveltyExplorationPolicy
 
 FIXTURES = Path(__file__).parent / "data"
 

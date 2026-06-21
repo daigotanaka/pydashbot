@@ -24,53 +24,49 @@ import yaml
 
 from dash.remote.client import send_command
 try:
-    from apps.map.policies.conservative_exploration import (
+    from apps.map.policies.exploration.conservative_exploration import (
         ConservativeExploration,
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
     )
-    from apps.map.policies.coverage_exploration import CoverageExploration
-    from apps.map.policies.novelty_exploration import NoveltyExplorationPolicy
-    from apps.map.policies.wall_follower import WallFollower, arc_pose_delta
+    from apps.map.policies.exploration.coverage_exploration import CoverageExploration
+    from apps.map.policies.exploration.novelty_exploration import NoveltyExplorationPolicy
+    from apps.map.policies.exploration.wall_follower import WallFollower, arc_pose_delta
     from apps.map.exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
     )
-    from apps.map.policies.exploration_policy_base import (
+    from apps.map.policies.exploration.exploration_policy_base import (
         PolicyContext,
         load_exploration_policy,
     )
-    from apps.map.strategies.go_home_strategies import (
-        DStarLiteStrategy,
-        HardBlockedEdgeStrategy,
-        edge_is_blocked,
-    )
+    from apps.map.policies.navigation.d_star_lite import DStarLitePolicy
+    from apps.map.policies.navigation.hard_blocked_edge import HardBlockedEdgePolicy
+    from apps.map.policies.navigation.navigation_policy_base import edge_is_blocked
 except ModuleNotFoundError:
-    from policies.conservative_exploration import (
+    from policies.exploration.conservative_exploration import (
         ConservativeExploration,
         GRID_CELLS,
         TERRITORY_MM,
         densify_path,
     )
-    from policies.coverage_exploration import CoverageExploration
-    from policies.novelty_exploration import NoveltyExplorationPolicy
-    from policies.wall_follower import WallFollower, arc_pose_delta
+    from policies.exploration.coverage_exploration import CoverageExploration
+    from policies.exploration.novelty_exploration import NoveltyExplorationPolicy
+    from policies.exploration.wall_follower import WallFollower, arc_pose_delta
     from exploration_walls import (
         WALL_SEGMENT_AVOID_MM,
         inferred_wall_segments,
         point_segment_distance,
     )
-    from policies.exploration_policy_base import (
+    from policies.exploration.exploration_policy_base import (
         PolicyContext,
         load_exploration_policy,
     )
-    from strategies.go_home_strategies import (
-        DStarLiteStrategy,
-        HardBlockedEdgeStrategy,
-        edge_is_blocked,
-    )
+    from policies.navigation.d_star_lite import DStarLitePolicy
+    from policies.navigation.hard_blocked_edge import HardBlockedEdgePolicy
+    from policies.navigation.navigation_policy_base import edge_is_blocked
 
 CAL_FILE_PATTERN = 'calibration_????????-??-??-??.json'
 
@@ -163,12 +159,12 @@ MAX_TRACKED_TURN_DEG = 90
 MIN_TRACKED_TURN_DEG = 20
 HOME_CLEAR_RETRY_DELAY = 0.3
 
-LEGACY_GO_HOME_STRATEGY = HardBlockedEdgeStrategy(
+LEGACY_GO_HOME_STRATEGY = HardBlockedEdgePolicy(
     HOME_ROUTE_LINK_RADIUS_MM,
     BLOCKED_EDGE_TOLERANCE_MM,
     HOME_ROUTE_COLLINEAR_DEG,
 )
-ACTIVE_GO_HOME_STRATEGY = DStarLiteStrategy(
+ACTIVE_GO_HOME_STRATEGY = DStarLitePolicy(
     HOME_ROUTE_LINK_RADIUS_MM,
     HOME_ROUTE_COLLINEAR_DEG,
 )

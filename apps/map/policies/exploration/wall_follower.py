@@ -20,9 +20,9 @@ import math
 import time
 
 try:
-    from apps.map.policies.exploration_policy_base import ExplorationPolicy
+    from apps.map.policies.exploration.exploration_policy_base import ExplorationPolicy
 except ModuleNotFoundError:
-    from policies.exploration_policy_base import ExplorationPolicy
+    from policies.exploration.exploration_policy_base import ExplorationPolicy
 
 DEFAULT_RADIUS_MM = 250
 DEFAULT_ARC_DEG = 360

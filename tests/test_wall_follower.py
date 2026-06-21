@@ -2,7 +2,7 @@ import math
 import time
 import unittest
 
-from apps.map.policies.wall_follower import (
+from apps.map.policies.exploration.wall_follower import (
     WallFollower,
     arc_pose_delta,
     nearest_point_on_segment,

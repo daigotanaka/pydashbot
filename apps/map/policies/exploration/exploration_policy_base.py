@@ -128,9 +128,9 @@ class ExplorationPolicy(ABC):
 # they are a separate family from the heading policies above, registered here so
 # load_exploration_policy can resolve a config by name.
 try:
-    from apps.map.policies.preset_exploration import PresetExplorationPolicy
+    from apps.map.policies.exploration.preset_exploration import PresetExplorationPolicy
 except ModuleNotFoundError:
-    from policies.preset_exploration import PresetExplorationPolicy
+    from policies.exploration.preset_exploration import PresetExplorationPolicy
 
 
 COMMAND_POLICIES = {
