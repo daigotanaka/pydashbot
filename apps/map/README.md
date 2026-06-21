@@ -712,11 +712,18 @@ This is flagged as two pieces of work, not one:
    through unknown space, abort on rejected odometry, etc.) carry over to a
    goal that is not "home" — needs design before implementation.
 
+Going home is a special case of navigating to a point: `go_home` calls the
+general `navigate_to_point(target_x, target_y, target_heading=...)`, which plans
+a route to the proven node nearest the target (`plan_route(..., target_xy=...)`),
+retraces it, and creeps the last stretch to the exact point. `go_home` passes
+the map's start pose as the target and enables the rear-wall re-reference.
+
 Relevant code: `DStarLitePolicy`, `HardBlockedEdgePolicy`, `plan_route` under
-`apps/map/policies/navigation/`; `go_home`, `go_home_with_retries` in
-`apps/map/main.py`; `CoverageExploration.heading_preference`,
-`_aim_toward_expansion`, `_select_territory_expansion` in
-`apps/map/policies/coverage_exploration.py`.
+`apps/map/policies/navigation/`; `navigate_to_point`, `go_home`,
+`go_home_with_retries` in `apps/map/main.py`;
+`CoverageExploration.heading_preference`, `_aim_toward_expansion`,
+`_select_territory_expansion` in
+`apps/map/policies/exploration/coverage_exploration.py`.
 
 ### Local Detour Exploration
 

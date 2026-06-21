@@ -38,6 +38,30 @@ class NavigationPolicyStructureTests(unittest.TestCase):
             self.assertEqual(route[0], (500.0, 0.0))
             self.assertEqual(route[-1], (0.0, 0.0))
 
+    def test_plan_route_targets_the_nearest_node_to_a_point(self):
+        data = {
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [[0, 0], [250, 0], [500, 0]],
+                    "blocked_edges": [],
+                }
+            ]
+        }
+        accepted_runs = lambda d: d["runs"]
+        trustworthy = lambda run: True
+
+        for strategy in (DStarLitePolicy(), HardBlockedEdgePolicy()):
+            # No target -> route home, to the start node.
+            self.assertEqual(
+                strategy.plan_route(data, accepted_runs, trustworthy)[-1], (0.0, 0.0)
+            )
+            # A target near the middle node routes to that node, not home.
+            to_mid = strategy.plan_route(
+                data, accepted_runs, trustworthy, target_xy=(240, 10)
+            )
+            self.assertEqual(to_mid[-1], (250.0, 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

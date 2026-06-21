@@ -24,10 +24,21 @@ class NavigationPolicy(ABC):
     name = 'navigation'
 
     @abstractmethod
-    def plan_route(self, data, accepted_runs, run_pose_trustworthy):
-        """Return an ordered list of ``(x, y)`` waypoints from the latest saved
-        pose back to the starting pose, or raise ``ValueError`` if no route
-        over the proven paths remains."""
+    def plan_route(self, data, accepted_runs, run_pose_trustworthy, target_xy=None):
+        """Plan a route over the proven graph from the latest saved pose.
+
+        ``target_xy`` is the destination point; the route ends at the proven
+        node nearest it. ``None`` targets the starting pose (go-home). Raises
+        ``ValueError`` if no route over the proven paths remains.
+        """
+
+
+def goal_node(positions, target_xy):
+    """The graph node to route to: the start node ``(0, 0)`` when ``target_xy``
+    is ``None`` (go-home), otherwise the proven node nearest the target point."""
+    if target_xy is None:
+        return (0, 0)
+    return min(positions, key=lambda node: math.dist(positions[node], target_xy))
 
 
 def _point_near_segment(point, seg_start, seg_end, tolerance):

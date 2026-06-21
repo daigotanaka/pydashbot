@@ -658,6 +658,29 @@ class MappingStrategyTests(unittest.TestCase):
     def test_active_go_home_strategy_is_d_star_lite(self):
         self.assertEqual(map_room.ACTIVE_GO_HOME_STRATEGY.name, "d-star-lite")
 
+    def test_go_home_is_navigate_to_point_at_the_start_pose(self):
+        # go_home is the navigate-to-point API targeting the saved start pose,
+        # with the rear-wall re-reference enabled for dock precision.
+        data = {
+            "runs": [
+                {
+                    "status": "accepted",
+                    "path": [[310, 310, 0], [500, 310, 0]],
+                    "quality": {"tracking_lost": False},
+                }
+            ]
+        }
+        with patch.object(map_room, "navigate_to_point") as navigate:
+            navigate.return_value = {"mode": "go_home"}
+            map_room.go_home(data, 1.0, 1.0)
+
+        args, kwargs = navigate.call_args
+        self.assertEqual(args[3], 310.0)  # target_x = start x
+        self.assertEqual(args[4], 310.0)  # target_y = start y
+        self.assertEqual(kwargs["target_heading"], 0.0)
+        self.assertEqual(kwargs["mode"], "go_home")
+        self.assertTrue(kwargs["rear_reference_on_arrival"])
+
     def test_obstacle_near_home_counts_as_arrival(self):
         obstacle = {"halt": "obstacle", "side": "front", "prox_left": 30, "prox_right": 27}
         # Obstacles within tolerance of home are arrival at the corner walls.

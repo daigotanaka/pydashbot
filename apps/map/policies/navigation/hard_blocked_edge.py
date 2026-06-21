@@ -11,6 +11,7 @@ try:
         _simplify_route,
         _validate_runs,
         edge_is_blocked,
+        goal_node,
     )
 except ModuleNotFoundError:
     from policies.navigation.navigation_policy_base import (
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
         _simplify_route,
         _validate_runs,
         edge_is_blocked,
+        goal_node,
     )
 
 
@@ -33,7 +35,7 @@ class HardBlockedEdgePolicy(NavigationPolicy):
         self.blocked_tolerance_mm = blocked_tolerance_mm
         self.collinear_degrees = collinear_degrees
 
-    def plan_route(self, data, accepted_runs, run_pose_trustworthy):
+    def plan_route(self, data, accepted_runs, run_pose_trustworthy, target_xy=None):
         runs = _validate_runs(data, accepted_runs, run_pose_trustworthy)
         records = _collect_blocked_records(data)
         blocked_edges = [(record["from"], record["to"]) for record in records]
@@ -47,7 +49,7 @@ class HardBlockedEdgePolicy(NavigationPolicy):
 
         positions, adjacency = _build_graph(runs, self.link_radius_mm, edge_cost)
         start = (len(runs) - 1, len(runs[-1]["path"]) - 1)
-        route = _dijkstra_route(adjacency, start, (0, 0))
+        route = _dijkstra_route(adjacency, start, goal_node(positions, target_xy))
         if route is None:
             if blocked_edges:
                 raise ValueError(

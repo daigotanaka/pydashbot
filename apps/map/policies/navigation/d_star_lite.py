@@ -11,6 +11,7 @@ try:
         _point_near_segment,
         _simplify_route,
         _validate_runs,
+        goal_node,
     )
 except ModuleNotFoundError:
     from policies.navigation.navigation_policy_base import (
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
         _point_near_segment,
         _simplify_route,
         _validate_runs,
+        goal_node,
     )
 
 
@@ -125,7 +127,7 @@ class DStarLitePolicy(NavigationPolicy):
         self.blocked_approach_penalty = blocked_approach_penalty
         self.inferred_link_penalty = inferred_link_penalty
 
-    def plan_route(self, data, accepted_runs, run_pose_trustworthy):
+    def plan_route(self, data, accepted_runs, run_pose_trustworthy, target_xy=None):
         runs = _validate_runs(data, accepted_runs, run_pose_trustworthy)
         blocked_records = _collect_blocked_records(data)
 
@@ -151,7 +153,7 @@ class DStarLitePolicy(NavigationPolicy):
 
         positions, adjacency = _build_graph(runs, self.link_radius_mm, edge_cost)
         start = (len(runs) - 1, len(runs[-1]["path"]) - 1)
-        goal = (0, 0)
+        goal = goal_node(positions, target_xy)
         route = DStarLite(adjacency, positions, start, goal).route()
         if route is None:
             raise ValueError(

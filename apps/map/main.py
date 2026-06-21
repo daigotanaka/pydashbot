@@ -801,9 +801,17 @@ def map_start_pose(data):
     return float(x), float(y), float(heading)
 
 
+def plan_route_to(data, target_xy=None, strategy=ACTIVE_GO_HOME_STRATEGY):
+    """Plan a route over the proven graph to ``target_xy`` (a point in the map
+    frame), or to the starting pose when ``target_xy`` is ``None`` (go-home)."""
+    return strategy.plan_route(
+        data, accepted_runs, run_pose_trustworthy, target_xy=target_xy
+    )
+
+
 def plan_home_route(data, strategy=ACTIVE_GO_HOME_STRATEGY):
-    """Return the route selected by the requested go-home strategy."""
-    return strategy.plan_route(data, accepted_runs, run_pose_trustworthy)
+    """Return the route home (to the starting pose)."""
+    return plan_route_to(data, None, strategy)
 
 
 # ---------------------------------------------------------------------------
@@ -991,10 +999,27 @@ def needs_wall_clearance(leg_turn_deg, prox_left, prox_right, threshold=PROX_THR
     return abs(leg_turn_deg) >= HOME_CLEARANCE_MIN_TURN_DEG and front >= threshold
 
 
-def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
-    """Follow the route selected by a go-home strategy."""
-    route = plan_home_route(data, strategy)
-    start_x, start_y, start_heading = map_start_pose(data)
+def navigate_to_point(
+    data,
+    deg_per_yaw,
+    mm_per_wd,
+    target_x,
+    target_y,
+    target_heading=None,
+    strategy=ACTIVE_GO_HOME_STRATEGY,
+    mode='navigate',
+    rear_reference_on_arrival=False,
+):
+    """Drive over the proven-route graph to ``(target_x, target_y)``.
+
+    Plans a route to the proven node nearest the target, retraces it, then
+    creeps the last stretch to the exact point. If ``target_heading`` is given
+    it faces that heading on arrival. ``go_home`` is this with the map's
+    starting pose as the target (plus a rear-wall re-reference for precision).
+    """
+    route = plan_route_to(data, (target_x, target_y), strategy)
+    # Internal aliases: the target is the "home" the retrace logic drives to.
+    start_x, start_y, start_heading = target_x, target_y, target_heading
     current_x, current_y, current_heading = accepted_runs(data)[-1]['path'][-1]
     x, y = float(current_x), float(current_y)
     heading = normalize_heading(float(current_heading))
@@ -1252,9 +1277,9 @@ def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
 
         if arrived:
             crawl_home()
-        if completed:
+        if completed and start_heading is not None:
             completed = turn_to(start_heading)
-        if arrived and completed:
+        if arrived and completed and rear_reference_on_arrival:
             rear_reference()
         home_tolerance = HOME_OBSTACLE_ACCEPT_MM if arrived else HOME_POSITION_TOLERANCE_MM
         if completed and math.hypot(start_x - x, start_y - y) > home_tolerance:
@@ -1277,7 +1302,7 @@ def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
         print(f"  Halt reason: {describe_halt(halt_reason, deg_per_yaw)}")
     return {
         'timestamp': datetime.now().isoformat(timespec='seconds'),
-        'mode': 'go_home',
+        'mode': mode,
         'strategy': strategy.name,
         'status': 'accepted' if completed else 'partial',
         'quality': {
@@ -1295,6 +1320,26 @@ def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
         'blocked_edges': blocked_edges,
         'events': events,
     }
+
+
+def go_home(data, deg_per_yaw, mm_per_wd, strategy=ACTIVE_GO_HOME_STRATEGY):
+    """Navigate to the map's starting pose -- go-home as a navigate-to-point.
+
+    Targets the saved start position and heading, and re-references the rear
+    wall on arrival for dock precision.
+    """
+    start_x, start_y, start_heading = map_start_pose(data)
+    return navigate_to_point(
+        data,
+        deg_per_yaw,
+        mm_per_wd,
+        start_x,
+        start_y,
+        target_heading=start_heading,
+        strategy=strategy,
+        mode='go_home',
+        rear_reference_on_arrival=True,
+    )
 
 
 def go_home_with_retries(
