@@ -156,6 +156,18 @@ project. It is centered on Dash, uses Bleak for Bluetooth Low Energy, and adds
 layered motion safety, persistent communication servers, WebSocket control,
 tests, and hardware tools.
 
+## Disclaimer
+
+`pydashbot` is an independent fan project and is not affiliated with, endorsed
+by, sponsored by, or otherwise associated with Wonder Workshop, Inc.
+
+Use of this software is at your own risk. You are solely responsible for how
+you install, configure, operate, or modify the software and for any resulting
+effects on your robot, devices, property, network, or surroundings. To the
+maximum extent permitted by applicable law, the project authors and contributors
+disclaim liability for any damages, losses, injuries, or other consequences
+arising from use of this software.
+
 ## License
 
 [Apache 2.0 License](LICENSE)
