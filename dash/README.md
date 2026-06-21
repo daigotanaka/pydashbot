@@ -119,32 +119,74 @@ robot.stop()
 
 Use `move()` and `turn()` when you want bounded motion.
 
+### Arc motion
+
+`arc()` drives a smooth circular arc using Dash's native pose command. The first
+argument is the arc radius in millimeters and the second is the heading sweep in
+degrees. Positive angles curve left; negative angles curve right.
+
+```python
+robot.arc(120, 60)       # 120 mm radius, 60 degrees left
+robot.arc(120, -60)      # 120 mm radius, 60 degrees right
+robot.arc(180, 180)      # split into smaller arc segments automatically
+```
+
+By default, arcs run at 150 mm/s, ease in and out, split large sweeps into
+90-degree segments, and monitor proximity sensors like `move()`. The return
+value is a dict with fields such as `halt`, `requested_angle_deg`,
+`completed_angle_deg`, `completed_fraction`, `segments`, `rel_pose_mm`, and
+`yaw_delta`.
+
+Useful options:
+
+```python
+robot.arc(120, 90, speed_mmps=100)
+robot.arc(120, 90, stop_at_obstacle=False)
+robot.arc(120, 90, max_segment_deg=45)
+robot.arc(120, 90, wall_stop_sound="confused8")
+```
+
+For backward arcs, pass `direction=PoseDirection.BACKWARD` from
+`dash.core.actuators`.
+
 ## Actuators
 
-Common actuator methods include:
+The public actuator API is available on both the asynchronous robot returned by
+`dash.core.robot.discover_and_connect()` and the synchronous facade returned by
+`dash.control.interactive.discover_and_connect_sync()`.
 
 ```python
 robot.say("hi")
+robot.beep()
+
 robot.eye(0x0FFF)
 robot.eye_brightness(255)
 robot.neck_color("purple")
 robot.left_ear_color("red")
 robot.right_ear_color("blue")
+robot.head_color("white")
 robot.tail_brightness(255)
 
 robot.head_yaw(30)
 robot.head_pitch(-10)
 robot.pose(x=10, y=0, theta=0, time=1)
 
+robot.drive(100)
+robot.spin(-100)
 robot.stop()
 robot.reset()
 ```
 
 For `pose()`, `x` and `y` are centimeters, `theta` is radians, and `time` is
-seconds.
+seconds. The optional pose controls are `mode`, `direction`, `wrap_theta`, and
+`ease`; import `PoseMode` and `PoseDirection` from `dash.core.actuators` when
+you need them.
 
 `eye()` takes a 12-bit mask selecting Dash's eye LEDs. Neck and ear colors may
 be color names understood by the `colour` package or `colour.Color` objects.
+Head yaw is clamped to `-53..53` degrees, head pitch to `-5..10` degrees, tail
+brightness to `0..255`, and continuous drive/spin speeds are clamped to the
+firmware ranges.
 
 ## Sounds
 
@@ -168,13 +210,50 @@ This project does not upload new audio to those slots.
 
 ## Sensors
 
-Examples:
+The getter API returns the latest decoded BLE sensor values. Getters return
+`None` until the corresponding sensor stream has produced data. Most motion,
+pose, wheel, and proximity values are raw firmware units; calibrate them for
+physical measurements when precision matters.
+
+Shared Dot/Dash stream getters:
 
 ```python
+robot.get_time()
+robot.get_index()
 robot.get_pitch()
 robot.get_roll()
-robot.get_yaw()
 robot.get_acceleration()
+
+robot.is_button_white_pressed()
+robot.is_button_1_pressed()
+robot.is_button_2_pressed()
+robot.is_button_3_pressed()
+
+robot.is_moving()
+robot.is_picked_up()
+robot.is_hit()
+robot.is_on_side()
+robot.is_nominal()
+
+robot.has_heard_clap()
+robot.get_mic_level()
+robot.get_sound_direction()
+
+robot.is_dot_left_of_dash()
+robot.is_dot_right_of_dash()
+robot.get_robot()
+```
+
+Dash-specific stream getters:
+
+```python
+robot.get_dash_time()
+robot.get_dash_index()
+
+robot.get_pitch_delta()
+robot.get_roll_delta()
+robot.get_yaw()
+robot.get_yaw_delta()
 
 robot.get_prox_left()
 robot.get_prox_right()
@@ -183,18 +262,14 @@ robot.get_prox_rear()
 robot.get_left_wheel()
 robot.get_right_wheel()
 robot.get_wheel_distance()
-
 robot.get_head_pitch()
 robot.get_head_yaw()
-robot.get_sound_direction()
-
-robot.is_moving()
-robot.is_picked_up()
-robot.is_hit()
 ```
 
-Button, microphone, and clap-related getters are also available. See
-[`dash/core/sensors.py`](core/sensors.py) for the complete sensor API.
+`get_time()` and `get_dash_time()` are host timestamps for the latest sensor
+packet, useful for detecting whether fresh readings have arrived. `get_robot()`
+reports the connected robot type once startup has identified the sensor
+streams.
 
 ## WebSocket Server
 
