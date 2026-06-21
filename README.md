@@ -34,8 +34,8 @@ At a high level:
 ## Requirements
 
 - Python 3.11
-- [uv](https://docs.astral.sh/uv/)
-- A Bluetooth Low Energy adapter
+- uv ([How to install uv](https://docs.astral.sh/uv/getting-started/installation/))
+- A Bluetooth Low Energy adapter (Any modern laptop should have it already)
 - A Wonder Workshop Dash robot
 
 `pydashbot` is tested on macOS and Ubuntu.
@@ -130,6 +130,14 @@ it on a trusted network.
 ## Programming your Dash with Python
 
 Want to develop your application with Python? See [dash/README.md](dash/README.md).
+
+## Letting an AI agent control Dash
+
+With pydashbot, AI agents like OpenClaw, Hermes, Claude Code, and Codex can control Dash.
+The easiest way to get started is to let them read this doc.
+Just note that your agent might not have a direct access to Bluetooth adapter.
+You may need to start the WebSocket server from a command prompt.
+AI agents should be able to start dashboard and map apps, or they can write scripts to control Dash.
 
 ## Credits
 
