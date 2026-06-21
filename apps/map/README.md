@@ -87,6 +87,36 @@ after its command list is exhausted.
 default is `1000`. Conservative and coverage exploration use this to keep the
 map growth bounded and compact.
 
+`docking.init` controls whether `start` runs the physical docking sequence. Keep
+it `true` for ordinary fresh runs. Set it to `false` only when you have manually
+placed Dash at the established start pose.
+
+`dashboard.active` makes the mapper publish live poses to an already running
+dashboard server. `dashboard.host` and `dashboard.port` must match the dashboard
+listener. `dock` does not publish live dashboard poses.
+
+## Policies
+
+A policy is a named decision-making module selected from the YAML config. The
+map app uses policies to separate robot behavior from shared plumbing such as
+calibration, map persistence, obstacle handling, dashboard publishing, and CLI
+run modes.
+
+Policies are selected under the `policies` config key:
+
+```yaml
+policies:
+  exploration: conservative
+  navigation: d-star-lite
+```
+
+### Exploration Policies
+
+Exploration policies decide how `start` and `resume` choose where Dash should
+drive next while building the map. Heading-based policies score candidate
+headings, and the mapper combines that score with shared physical safety
+penalties. Self-driving policies can take over the exploration loop directly.
+
 `policies.exploration` can be a policy name:
 
 - `conservative`: bounded territories and frontier-oriented exploration.
@@ -118,12 +148,18 @@ Preset course files contain either a command list or an object with a
 }
 ```
 
+### Navigation Policies
+
+Navigation policies decide how `dock` plans a route from the latest saved pose
+back to the start. They plan over proven path segments from accepted map runs
+instead of inventing shortcuts through unknown space.
+
 `policies.navigation` selects the route planner used by `dock`:
 
 - `d-star-lite`: replans with soft costs around failed approaches.
 - `hard-blocked-edge`: excludes blocked corridors more aggressively.
 
-## Custom Policies
+### Custom Policies
 
 Exploration and navigation policies are ordinary Python classes selected by
 name from the YAML config. Add a new policy when you want to experiment with
@@ -216,14 +252,6 @@ policies:
 Add focused tests next to the existing policy tests before running the robot.
 `tests/test_coverage_exploration.py`, `tests/test_wall_follower.py`, and
 `tests/test_navigation.py` are good templates.
-
-`docking.init` controls whether `start` runs the physical docking sequence. Keep
-it `true` for ordinary fresh runs. Set it to `false` only when you have manually
-placed Dash at the established start pose.
-
-`dashboard.active` makes the mapper publish live poses to an already running
-dashboard server. `dashboard.host` and `dashboard.port` must match the dashboard
-listener. `dock` does not publish live dashboard poses.
 
 ## Calibration
 
