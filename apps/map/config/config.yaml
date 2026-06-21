@@ -1,30 +1,29 @@
 map_file: data/room_map.json
 calibration: data/calibration/calibration_20260613-18-39-49.json
 duration_seconds: 60
-# Exploration policy (selected by name):
-# - conservative  : bounded territories, frontier-alignment objective
-# - coverage      : bounded territories, maximize newly-visited cells per leg
-# - novelty       : no territory limit, head toward unexplored space
-# - wall-follower : arc-based; drive to a wall, then hug it with arcs
-exploration_policy: coverage
 territory_size_mm: 1000
 
-# Available exploration policies:
-# - preset
-# - map-guided (active when policy is omitted)
-#
-# Exploration policies are ordered by priority; the first policy drives.
+# Policies selected by name.
+policies:
+  # Exploration (which way to drive while mapping):
+  # - conservative  : bounded territories, frontier-alignment objective
+  # - coverage      : bounded territories, maximize newly-visited cells per leg
+  # - novelty       : no territory limit, head toward unexplored space
+  # - wall-follower : arc-based; drive to a wall, then hug it with arcs
+  exploration: coverage
+  # Navigation (route planning between points; go-home is its caller):
+  # - d-star-lite       : replan with soft costs around failed approaches
+  # - hard-blocked-edge : permanently exclude every corridor marked blocked
+  navigation: hard-blocked-edge
+
+# Command (preset course) policy; overrides exploration while it runs.
 # policy:
 #   - name: preset
-#    input_file: data/preset_courses/course.json
+#     input_file: data/preset_courses/course.json
 
-# Available go-home strategies:
-# - d-star-lite
-# - hard-blocked-edge
 docking:
   # false to skip the initial dock positioning sequence
   init: false
-  go-home-strategy: hard-blocked-edge
 
 dashboard:
   active: true

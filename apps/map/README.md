@@ -34,23 +34,26 @@ reusable mapping settings:
 map_file: data/room_map.json
 calibration: data/calibration/calibration_20260612.json
 duration_seconds: 60
-exploration_policy: conservative
 territory_size_mm: 1000
+policies:
+  exploration: conservative
+  navigation: d-star-lite
 policy:
   - name: preset
     input_file: data/course.json
 docking:
   init: true
-  go-home-strategy: d-star-lite
 ```
 
-`exploration_policy` selects the heading policy by name: `conservative`
+`policies.exploration` selects the heading policy by name: `conservative`
 (bounded territories, frontier-alignment objective; the default), `coverage`
 (bounded territories, maximize newly-visited cells per leg — see
 [The coverage objective](#step-5-done-the-coverage-objective--coverageexploration)),
-or `novelty` (no territory limit, head toward unexplored space). The separate
-`policy:` list below is the *command* (preset course) policy and overrides
-heading selection while it runs.
+`novelty` (no territory limit, head toward unexplored space), or `wall-follower`.
+`policies.navigation` selects the route planner used to travel between points
+over the proven graph — `d-star-lite` (default) or `hard-blocked-edge`; today
+go-home is its only caller. The separate `policy:` list below is the *command*
+(preset course) policy and overrides heading selection while it runs.
 
 Exploration policies are ordered by priority. When `policy` is present, the
 first policy drives the robot. The `preset` policy reads a JSON command course
@@ -178,7 +181,7 @@ than re-driving cells it has already visited. Each leg stops early on a wall, a
 tilt, or a territory boundary; odometry is validated after every command and
 loop-closure corrections against known landmarks bound the drift. As cells are
 resolved the policy unlocks adjacent territory so the explored region grows
-compactly. Set `exploration_policy: novelty` for undirected forward legs, or
+compactly. Set `policies.exploration: novelty` for undirected forward legs, or
 change `territory_size_mm` to adjust the territory granularity.
 
 `duration_seconds` defaults to 60. `start` creates `map_file` when it does not
@@ -213,7 +216,7 @@ edges that approach the actual stop position from the same direction. The edge
 remains available as a last resort, avoiding false "no route home" failures
 caused by deleting broad overlapping corridors.
 
-Set `docking.go-home-strategy` to `hard-blocked-edge` in the config to use the
+Set `policies.navigation` to `hard-blocked-edge` in the config to use the
 previous hard-exclusion strategy for A/B testing.
 
 A single `dock` invocation replans automatically: if an attempt aborts on a
@@ -514,7 +517,7 @@ uncharted territory so the explored region grows compactly.
 
 This feature is experimental and isolated in
 `apps/map/policies/exploration/conservative_exploration.py`. Set
-`exploration_policy: novelty` to disable it.
+`policies.exploration: novelty` to disable it.
 
 The core explorer interacts with the policy only through optional hooks for
 heading constraints, forward-distance limits, progress reporting, territory
@@ -578,7 +581,7 @@ regime is owned by the next step.
 
 `coverage_exploration.py` adds `CoverageExploration`, a subclass of
 `ConservativeExploration` that reflects the redefined objective directly.
-Enable it with `exploration_policy: coverage` in the config. It reuses the
+Enable it with `policies.exploration: coverage` in the config. It reuses the
 parent's territory constraint machinery and changes six things:
 
 - **Objective in `heading_preference`:** rewards the **count of new reachable,

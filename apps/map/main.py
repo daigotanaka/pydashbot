@@ -187,15 +187,21 @@ MAPPING_CONFIG_KEYS = {
     'map_file',
     'calibration',
     'duration_seconds',
-    'exploration_policy',
+    'policies',
     'territory_size_mm',
     'docking',
     'policy',
     'dashboard',
 }
+# Policies selected by name: the exploration policy drives mapping; the
+# navigation policy plans routes between points over the proven graph (go-home
+# is its only caller today). Navigation defaults to the active go-home planner.
+DEFAULT_POLICIES_CONFIG = {
+    'exploration': DEFAULT_EXPLORATION_POLICY,
+    'navigation': ACTIVE_GO_HOME_STRATEGY.name,
+}
 DEFAULT_DOCKING_CONFIG = {
     'init': True,
-    'go-home-strategy': ACTIVE_GO_HOME_STRATEGY.name,
 }
 DEFAULT_DASHBOARD_CONFIG = {
     'active': False,
@@ -257,14 +263,12 @@ def apply_mapping_config(options, config, parser):
     options.duration = config.get('duration_seconds', DURATION)
     options.territory_size = config.get('territory_size_mm', TERRITORY_MM)
     options.docking = validate_docking_config(config.get('docking', {}), parser)
-    options.go_home_strategy = options.docking['go-home-strategy']
+    policies = validate_policies_config(config.get('policies', {}), parser)
+    options.exploration_policy = policies['exploration']
+    options.go_home_strategy = policies['navigation']
     options.policy = validate_policy_config(config.get('policy', []), parser)
     options.dashboard = validate_dashboard_config(
         config.get('dashboard', {}), parser
-    )
-
-    options.exploration_policy = config.get(
-        'exploration_policy', DEFAULT_EXPLORATION_POLICY
     )
 
     try:
@@ -272,15 +276,33 @@ def apply_mapping_config(options, config, parser):
         options.territory_size = positive_mm(options.territory_size)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
-    if options.exploration_policy not in EXPLORATION_POLICIES:
+
+
+def validate_policies_config(policies, parser):
+    """Validate the exploration and navigation policy selections."""
+    if policies is None:
+        policies = {}
+    if not isinstance(policies, dict):
+        parser.error("config policies must be a mapping")
+    unknown = sorted(set(policies) - set(DEFAULT_POLICIES_CONFIG))
+    if unknown:
+        parser.error(f"unknown policies setting(s): {', '.join(unknown)}")
+    merged = {**DEFAULT_POLICIES_CONFIG, **policies}
+    if merged['exploration'] not in EXPLORATION_POLICIES:
         parser.error(
-            "config exploration_policy must be one of: "
+            "config policies.exploration must be one of: "
             f"{', '.join(EXPLORATION_POLICIES)}"
         )
+    if merged['navigation'] not in GO_HOME_STRATEGIES:
+        parser.error(
+            "config policies.navigation must be one of: "
+            f"{', '.join(GO_HOME_STRATEGIES)}"
+        )
+    return merged
 
 
 def validate_docking_config(docking, parser):
-    """Validate dock initialization and go-home settings."""
+    """Validate dock initialization settings."""
     if docking is None:
         docking = {}
     if not isinstance(docking, dict):
@@ -291,11 +313,6 @@ def validate_docking_config(docking, parser):
     merged = {**DEFAULT_DOCKING_CONFIG, **docking}
     if not isinstance(merged['init'], bool):
         parser.error("config docking.init must be true or false")
-    if merged['go-home-strategy'] not in GO_HOME_STRATEGIES:
-        parser.error(
-            "config docking.go-home-strategy must be one of: "
-            f"{', '.join(GO_HOME_STRATEGIES)}"
-        )
     return merged
 
 

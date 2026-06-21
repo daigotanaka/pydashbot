@@ -39,16 +39,13 @@ class MappingStrategyTests(unittest.TestCase):
                 map_room.parse_args(["start", "--config", str(config)])
 
     def test_mapping_config_defaults_to_conservative_exploration(self):
-        # When the config omits exploration_policy, fall back to the default.
+        # When the config omits policies, fall back to the defaults.
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.yaml"
             config.write_text('{"map_file": "map.json"}')
             options = map_room.parse_args(["start", "--config", str(config)])
         self.assertEqual(options.exploration_policy, "conservative")
-        self.assertEqual(
-            options.docking,
-            {"init": True, "go-home-strategy": "d-star-lite"},
-        )
+        self.assertEqual(options.docking, {"init": True})
         self.assertEqual(options.go_home_strategy, "d-star-lite")
         self.assertEqual(
             options.dashboard,
@@ -140,7 +137,7 @@ class MappingStrategyTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.yaml"
             config.write_text(
-                '{"map_file":"map.json","exploration_policy":"wall-follower"}'
+                '{"map_file":"map.json","policies":{"exploration":"wall-follower"}}'
             )
             options = map_room.parse_args(["start", "--config", str(config)])
         self.assertEqual(options.exploration_policy, "wall-follower")
@@ -149,7 +146,7 @@ class MappingStrategyTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             config = Path(directory) / "mapping.yaml"
             config.write_text(
-                '{"map_file":"map.json","exploration_policy":"nope"}'
+                '{"map_file":"map.json","policies":{"exploration":"nope"}}'
             )
             with self.assertRaises(SystemExit):
                 map_room.parse_args(["start", "--config", str(config)])
@@ -163,11 +160,13 @@ class MappingStrategyTests(unittest.TestCase):
                         "map_file": "data/room_map.json",
                         "calibration": "data/calibration.json",
                         "duration_seconds": 300,
-                        "exploration_policy": "coverage",
+                        "policies": {
+                            "exploration": "coverage",
+                            "navigation": "hard-blocked-edge",
+                        },
                         "territory_size_mm": 1500,
                         "docking": {
                             "init": False,
-                            "go-home-strategy": "hard-blocked-edge",
                         },
                     }
                 )
@@ -181,10 +180,7 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(options.duration, 300)
         self.assertEqual(options.exploration_policy, "coverage")
         self.assertEqual(options.territory_size, 1500)
-        self.assertEqual(
-            options.docking,
-            {"init": False, "go-home-strategy": "hard-blocked-edge"},
-        )
+        self.assertEqual(options.docking, {"init": False})
         self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
 
     def test_mapping_config_option_can_precede_mode(self):
@@ -225,8 +221,8 @@ class MappingStrategyTests(unittest.TestCase):
                     {
                         "map_file": "new.json",
                         "duration_seconds": 300,
-                        "docking": {
-                            "go-home-strategy": "hard-blocked-edge",
+                        "policies": {
+                            "navigation": "hard-blocked-edge",
                         },
                     }
                 )
@@ -237,10 +233,7 @@ class MappingStrategyTests(unittest.TestCase):
         self.assertEqual(options.mode, "resume")
         self.assertEqual(options.map_file, "new.json")
         self.assertEqual(options.duration, 300)
-        self.assertEqual(
-            options.docking,
-            {"init": True, "go-home-strategy": "hard-blocked-edge"},
-        )
+        self.assertEqual(options.docking, {"init": True})
         self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
 
     def test_mapping_config_rejects_unknown_settings(self):
@@ -255,29 +248,31 @@ class MappingStrategyTests(unittest.TestCase):
             config = Path(directory) / "mapping.yaml"
             config.write_text(
                 "map_file: room_map.json\n"
-                "# Available strategies: d-star-lite, hard-blocked-edge\n"
+                "# Available navigation policies: d-star-lite, hard-blocked-edge\n"
+                "policies:\n"
+                "  navigation: hard-blocked-edge\n"
                 "docking:\n"
                 "  init: false\n"
-                "  go-home-strategy: hard-blocked-edge\n"
             )
 
             options = map_room.parse_args(["dock", "--config", str(config)])
 
         self.assertEqual(options.map_file, "room_map.json")
-        self.assertEqual(
-            options.docking,
-            {"init": False, "go-home-strategy": "hard-blocked-edge"},
-        )
+        self.assertEqual(options.docking, {"init": False})
         self.assertEqual(options.go_home_strategy, "hard-blocked-edge")
 
-    def test_mapping_config_rejects_root_go_home_strategy(self):
-        with TemporaryDirectory() as directory:
-            config = Path(directory) / "mapping.yaml"
-            config.write_text(
-                '{"map_file":"room_map.json","go_home_strategy":"hard-blocked-edge"}'
-            )
-            with self.assertRaises(SystemExit):
-                map_room.parse_args(["dock", "--config", str(config)])
+    def test_mapping_config_rejects_legacy_schema_keys(self):
+        # The pre-`policies` schema is no longer accepted (breaking change):
+        # exploration_policy at root and go-home-strategy under docking.
+        for legacy in (
+            '{"map_file":"room_map.json","exploration_policy":"coverage"}',
+            '{"map_file":"room_map.json","docking":{"go-home-strategy":"d-star-lite"}}',
+        ):
+            with TemporaryDirectory() as directory:
+                config = Path(directory) / "mapping.yaml"
+                config.write_text(legacy)
+                with self.assertRaises(SystemExit):
+                    map_room.parse_args(["dock", "--config", str(config)])
 
     def test_mapping_config_rejects_invalid_docking_init(self):
         with TemporaryDirectory() as directory:
